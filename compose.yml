@@ -1,0 +1,25 @@
+services:
+  redis:
+    image: redis:7.4
+    ports:
+      - "6379:6379"
+
+  # app:
+  #   restart: always
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #     args:
+  #       GH_NPM_TOKEN:
+  #   env_file:
+  #     - ./.env
+  #   ports:
+  #     - 3000:3000
+  #   links:
+  #     - db
+  #   volumes:
+  #     - ./:/src
+
+volumes:
+  db:
+    driver: local
