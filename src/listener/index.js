@@ -19,6 +19,13 @@ async function initializeListener() {
     telegramClient = await initializeClient();
     logger.info('Telegram client initialized');
     
+    // Ensure client is connected before continuing
+    if (!telegramClient.connected) {
+      logger.info('Connecting to Telegram...');
+      await telegramClient.connect();
+      logger.info('Connected to Telegram');
+    }
+    
     // Start listening for new messages
     await startMessageListener();
     
@@ -62,18 +69,28 @@ async function logConnectedChats() {
   try {
     logger.info('Fetching connected dialogs...');
     
+    // Make sure client is connected
+    if (!telegramClient.connected) {
+      logger.info('Reconnecting to Telegram before fetching dialogs...');
+      await telegramClient.connect();
+    }
+    
     const dialogs = await telegramClient.getDialogs({});
     logger.info(`Connected to ${dialogs.length} dialogs`);
     
     // Log the first 10 dialogs for verification
-    const dialogSample = dialogs.slice(0, 10);
+    const dialogSample = dialogs.slice(0, Math.min(10, dialogs.length));
     for (const dialog of dialogSample) {
-      const entity = dialog.entity;
-      const id = entity.id.toString();
-      const title = entity.title || 'Private Chat';
-      const type = entity.className || 'Unknown';
-      
-      logger.info(`Dialog: ${title} (ID: ${id}, Type: ${type})`);
+      try {
+        const entity = dialog.entity;
+        const id = entity.id ? entity.id.toString() : 'unknown';
+        const title = entity.title || 'Private Chat';
+        const type = entity.className || 'Unknown';
+        
+        logger.info(`Dialog: ${title} (ID: ${id}, Type: ${type})`);
+      } catch (error) {
+        logger.error(`Error processing dialog: ${error.message}`);
+      }
     }
   } catch (error) {
     logger.error(`Error fetching dialogs: ${error.message}`, { error });
@@ -91,26 +108,46 @@ async function handleNewMessage(event) {
     // Skip messages without text
     if (!message.text) return;
     
-    // Get chat ID
+    // Debug log raw message for troubleshooting
+    logger.debug(`Raw message: ${JSON.stringify(message, null, 2).substring(0, 500)}...`);
+    
+    // Get chat ID - corrected for the actual message format
     let chatId;
-    if (message.peerId.channelId) {
-      chatId = message.peerId.channelId.toString();
-    } else if (message.peerId.chatId) {
-      chatId = message.peerId.chatId.toString();
-    } else if (message.peerId.userId) {
-      chatId = message.peerId.userId.toString();
-    } else {
-      // Try to get ID directly from peer
-      chatId = message.peerId.toString();
+    
+    // Try various ways to get the chat ID based on the actual message structure
+    if (message.peerId && typeof message.peerId === 'object') {
+      // For newer Telegram client versions
+      if (message.peerId.channelId) {
+        chatId = `-100${message.peerId.channelId.toString()}`;
+      } else if (message.peerId.chatId) {
+        chatId = `-${message.peerId.chatId.toString()}`;
+      } else if (message.peerId.userId) {
+        chatId = message.peerId.userId.toString();
+      }
+    } else if (message.chatId) {
+      // Direct chat ID if available
+      chatId = message.chatId.toString();
+    } else if (message.chat && message.chat.id) {
+      // Another possible format
+      chatId = message.chat.id.toString();
     }
     
-    // Handle thread case
-    if (message.replyTo && message.replyTo.replyToMsgId) {
-      chatId = `${chatId}/${message.replyTo.replyToMsgId}`;
+    // Handle thread case if applicable
+    if (message.groupedId || (message.replyTo && message.replyTo.replyToMsgId)) {
+      const threadId = message.groupedId || message.replyTo.replyToMsgId;
+      // Some channel formats might already include the thread ID
+      if (!chatId.includes('/')) {
+        chatId = `${chatId}/${threadId}`;
+      }
     }
     
-    // Debug log the message
-    logger.debug(`Received message: ${JSON.stringify({
+    if (!chatId) {
+      logger.warn(`Could not determine chat ID for message: ${message.text.substring(0, 100)}`);
+      return;
+    }
+    
+    // Debug log the processed message
+    logger.debug(`Processed message: ${JSON.stringify({
       text: message.text.substring(0, 100) + (message.text.length > 100 ? '...' : ''),
       chatId,
       messageId: message.id

@@ -1,4 +1,3 @@
-const { Api } = require('telegram');
 const { initializeClient } = require('../utils/telegramAuth');
 const config = require('../config');
 const logger = require('../utils/logger');
@@ -8,7 +7,7 @@ let telegramClient;
 
 /**
  * Initialize the Telegram client for sending messages
- * @returns {Promise<void>}
+ * @returns {Promise<Object>} Telegram client instance
  */
 async function initializeSender() {
   try {
@@ -16,7 +15,16 @@ async function initializeSender() {
     if (!telegramClient) {
       telegramClient = await initializeClient();
       logger.info('Telegram sender initialized');
+      
+      // Ensure client is connected
+      if (!telegramClient.connected) {
+        logger.info('Connecting telegram sender client...');
+        await telegramClient.connect();
+        logger.info('Telegram sender client connected');
+      }
     }
+    
+    return telegramClient;
   } catch (error) {
     logger.error(`Failed to initialize Telegram sender: ${error.message}`, { error });
     throw error;
@@ -29,19 +37,24 @@ async function initializeSender() {
  * @returns {Object} Object with parsed chat ID and thread ID
  */
 function parseChatId(chatId) {
-  // Check if the chat ID includes a thread ID
-  if (chatId.includes('/')) {
-    const [mainId, threadId] = chatId.split('/');
+  try {
+    // Check if the chat ID includes a thread ID
+    if (chatId.includes('/')) {
+      const [mainId, threadId] = chatId.split('/');
+      return {
+        chatId: mainId,
+        threadId: parseInt(threadId)
+      };
+    }
+    
     return {
-      chatId: parseInt(mainId),
-      threadId: parseInt(threadId)
+      chatId: chatId,
+      threadId: null
     };
+  } catch (error) {
+    logger.error(`Error parsing chat ID ${chatId}: ${error.message}`, { error });
+    return { chatId: chatId, threadId: null };
   }
-  
-  return {
-    chatId: parseInt(chatId),
-    threadId: null
-  };
 }
 
 /**
@@ -52,10 +65,8 @@ function parseChatId(chatId) {
  */
 async function sendMessage(chatId, text) {
   try {
-    // Make sure client is initialized
-    if (!telegramClient) {
-      await initializeSender();
-    }
+    // Make sure client is initialized and connected
+    const client = await initializeSender();
     
     // Parse the chat ID
     const { chatId: parsedChatId, threadId } = parseChatId(chatId);
@@ -72,7 +83,7 @@ async function sendMessage(chatId, text) {
     }
     
     // Send the message
-    await telegramClient.sendMessage(params);
+    await client.sendMessage(params);
     
     logger.info(`Sent message to chat ${chatId}`);
     return true;
@@ -103,11 +114,6 @@ async function forwardMessage(text, destinationChannels) {
     return result;
   }
   
-  // Make sure client is initialized
-  if (!telegramClient) {
-    await initializeSender();
-  }
-  
   // Send message to each destination channel
   for (const channelId of destinationChannels) {
     try {
@@ -130,17 +136,8 @@ async function forwardMessage(text, destinationChannels) {
   return result;
 }
 
-// Initialize when module is loaded
-(async () => {
-  try {
-    await initializeSender();
-  } catch (error) {
-    logger.error(`Failed to initialize Telegram sender: ${error.message}`, { error });
-  }
-})();
-
 module.exports = {
   sendMessage,
   forwardMessage,
-  telegramClient,
+  initializeSender
 };

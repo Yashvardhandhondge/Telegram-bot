@@ -1,45 +1,56 @@
-version: "3.8"
 services:
   redis:
     image: redis:latest
     ports:
       - "6379:6379"
     command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
-
-  redis-init:
-    image: redis:alpine
-    depends_on:
-      - redis
-    environment:
-      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
-      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
-      TELEGRAM_SESSION_STRING: ${TELEGRAM_SESSION_STRING}
-      AI_PROVIDER: ${AI_PROVIDER}
-      AI_API_KEY: ${AI_API_KEY}
-      NODE_ENV: ${NODE_ENV}
-      PORT: ${PORT}
-      LOG_LEVEL: ${LOG_LEVEL}
-      MESSAGE_QUEUE_NAME: ${MESSAGE_QUEUE_NAME}
-      MAX_QUEUE_RETRIES: ${MAX_QUEUE_RETRIES}
-      MESSAGE_PROCESS_TIMEOUT: ${MESSAGE_PROCESS_TIMEOUT}
     volumes:
-      - ./redis-init.sh:/redis-init.sh
-    command: ["sh", "/redis-init.sh"]
-    restart: "no"
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   app:
     build:
       context: .
       dockerfile: Dockerfile
     depends_on:
-      - redis
-      - redis-init
+      redis:
+        condition: service_healthy
     env_file:
       - .env
+    environment:
+      - DOCKER_ENV=true
+      - REDIS_HOST=redis
     ports:
       - "3000:3000"
+    volumes:
+      - ./:/app
+      - /app/node_modules
     command: ["npm", "run", "run:listener"]
+    restart: unless-stopped
+
+  consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - DOCKER_ENV=true
+      - REDIS_HOST=redis
+      - RUN_CONSUMER=true
+    volumes:
+      - ./:/app
+      - /app/node_modules
+    command: ["node", "src/consumer"]
+    restart: unless-stopped
 
 volumes:
-  db:
+  redis-data:
     driver: local
