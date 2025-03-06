@@ -1,5 +1,5 @@
 const { initializeClient } = require('../utils/telegramAuth');
-const config = require('../config');
+// const config = require('../config');
 const logger = require('../utils/logger');
 
 // Global Telegram client instance

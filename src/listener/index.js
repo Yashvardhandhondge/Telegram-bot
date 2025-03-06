@@ -1,4 +1,4 @@
-const { TelegramClient } = require('telegram');
+// const { TelegramClient } = require('telegram');
 const { NewMessage } = require('telegram/events');
 const { initializeClient } = require('../utils/telegramAuth');
 const config = require('../config');
