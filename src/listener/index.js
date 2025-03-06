@@ -1,6 +1,7 @@
-// const { TelegramClient } = require('telegram');
+const { TelegramClient } = require('telegram');
 const { NewMessage } = require('telegram/events');
-const { initializeClient } = require('../utils/telegramAuth');
+const { Api } = require('telegram');
+const { initializeClient, sendPing } = require('../utils/telegramAuth');
 const config = require('../config');
 const logger = require('../utils/logger');
 const { enqueueMessage } = require('../utils/queue');
@@ -24,6 +25,14 @@ async function initializeListener() {
       logger.info('Connecting to Telegram...');
       await telegramClient.connect();
       logger.info('Connected to Telegram');
+    }
+
+    // Verify connection with a ping
+    try {
+      await sendPing(telegramClient);
+    } catch (error) {
+      logger.error(`Ping failed: ${error.message}`);
+      // Continue anyway, we'll try to recover
     }
 
     // Start listening for new messages
@@ -75,7 +84,14 @@ async function logConnectedChats() {
       await telegramClient.connect();
     }
 
-    const dialogs = await telegramClient.getDialogs({});
+    // Try with increased timeout
+    const dialogs = await Promise.race([
+      telegramClient.getDialogs({}),
+      new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Timeout fetching dialogs')), 20000)
+      )
+    ]);
+    
     logger.info(`Connected to ${dialogs.length} dialogs`);
 
     // Log the first 10 dialogs for verification
@@ -94,6 +110,8 @@ async function logConnectedChats() {
     }
   } catch (error) {
     logger.error(`Error fetching dialogs: ${error.message}`, { error });
+    logger.warn('Continuing without dialog information');
+    // Don't throw error, let the listener start anyway
   }
 }
 
@@ -108,8 +126,9 @@ async function handleNewMessage(event) {
     // Skip messages without text
     if (!message.text) return;
 
-    // Debug log raw message for troubleshooting
-    logger.debug(`Raw message: ${JSON.stringify(message, null, 2).substring(0, 500)}...`);
+    // Debug log raw message structure (just first level keys to avoid huge logs)
+    const messageKeys = Object.keys(message);
+    logger.debug(`Message received with keys: ${messageKeys.join(', ')}`);
 
     // Get chat ID - corrected for the actual message format
     let chatId;
@@ -148,16 +167,12 @@ async function handleNewMessage(event) {
 
     // Debug log the processed message
     logger.debug(
-      `Processed message: ${JSON.stringify({
-        text: message.text.substring(0, 100) + (message.text.length > 100 ? '...' : ''),
-        chatId,
-        messageId: message.id,
-      })}`,
+      `Processed message from ${chatId}: ${message.text.substring(0, 100)}${message.text.length > 100 ? '...' : ''}`
     );
 
     // Check if this chat is in our mapping
     if (isChatInMapping(chatId)) {
-      logger.info(`Received message from chat ${chatId}`);
+      logger.info(`Received message from chat ${chatId}: ${message.text.substring(0, 30)}...`);
 
       // Get message info
       const sender = message.sender ? message.sender.username || message.sender.id : 'Unknown';
@@ -176,7 +191,11 @@ async function handleNewMessage(event) {
       // Enqueue message for processing
       await enqueueMessage(messageData);
     } else {
-      logger.debug(`Message from unmapped chat ${chatId}`);
+      // Log some useful information for debugging mapping issues
+      logger.debug(`Message from unmapped chat ${chatId} (not in our mapping)`);
+      if (config.logging.level === 'debug') {
+        logger.debug(`Available mappings: ${JSON.stringify(channelMapping)}`);
+      }
     }
   } catch (error) {
     logger.error(`Error handling message: ${error.message}`, { error });
@@ -189,12 +208,17 @@ async function handleNewMessage(event) {
  * @returns {boolean} True if chat is in mapping, false otherwise
  */
 function isChatInMapping(chatId) {
-  for (const user in channelMapping) {
-    if (Object.keys(channelMapping[user]).includes(chatId)) {
-      return true;
+  try {
+    for (const user in channelMapping) {
+      if (Object.keys(channelMapping[user]).includes(chatId)) {
+        return true;
+      }
     }
+    return false;
+  } catch (error) {
+    logger.error(`Error checking chat mapping: ${error.message}`, { error });
+    return false;
   }
-  return false;
 }
 
 /**
@@ -203,12 +227,17 @@ function isChatInMapping(chatId) {
  * @returns {string[]} Array of destination channel IDs
  */
 function getDestinationChannels(sourceChatId) {
-  for (const user in channelMapping) {
-    if (sourceChatId in channelMapping[user]) {
-      return channelMapping[user][sourceChatId];
+  try {
+    for (const user in channelMapping) {
+      if (sourceChatId in channelMapping[user]) {
+        return channelMapping[user][sourceChatId];
+      }
     }
+    return [];
+  } catch (error) {
+    logger.error(`Error getting destination channels: ${error.message}`, { error });
+    return [];
   }
-  return [];
 }
 
 // Start the listener when this module is loaded
