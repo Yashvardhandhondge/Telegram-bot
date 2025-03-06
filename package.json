@@ -28,8 +28,8 @@
     "helmet": "^8.0.0",
     "input": "^1.0.1",
     "morgan": "^1.10.0",
-    "node-telegram-bot-api": "^0.63.0",
-    "openai": "^4.86.1",
+    "node-telegram-bot-api": "^0.66.0",
+    "openai": "^4.86.2",
     "redis": "^4.7.0",
     "telegram": "^2.26.22",
     "winston": "^3.17.0"
