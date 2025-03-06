@@ -15,7 +15,7 @@ async function initializeSender() {
     if (!telegramClient) {
       telegramClient = await initializeClient();
       logger.info('Telegram sender initialized');
-      
+
       // Ensure client is connected
       if (!telegramClient.connected) {
         logger.info('Connecting telegram sender client...');
@@ -23,7 +23,7 @@ async function initializeSender() {
         logger.info('Telegram sender client connected');
       }
     }
-    
+
     return telegramClient;
   } catch (error) {
     logger.error(`Failed to initialize Telegram sender: ${error.message}`, { error });
@@ -43,13 +43,13 @@ function parseChatId(chatId) {
       const [mainId, threadId] = chatId.split('/');
       return {
         chatId: mainId,
-        threadId: parseInt(threadId)
+        threadId: parseInt(threadId),
       };
     }
-    
+
     return {
       chatId: chatId,
-      threadId: null
+      threadId: null,
     };
   } catch (error) {
     logger.error(`Error parsing chat ID ${chatId}: ${error.message}`, { error });
@@ -67,24 +67,24 @@ async function sendMessage(chatId, text) {
   try {
     // Make sure client is initialized and connected
     const client = await initializeSender();
-    
+
     // Parse the chat ID
     const { chatId: parsedChatId, threadId } = parseChatId(chatId);
-    
+
     // Create message parameters
     const params = {
       peer: parsedChatId,
-      message: text
+      message: text,
     };
-    
+
     // Add reply to thread if applicable
     if (threadId) {
       params.replyTo = threadId;
     }
-    
+
     // Send the message
     await client.sendMessage(params);
-    
+
     logger.info(`Sent message to chat ${chatId}`);
     return true;
   } catch (error) {
@@ -105,20 +105,20 @@ async function forwardMessage(text, destinationChannels) {
     failure: 0,
     channels: {
       successful: [],
-      failed: []
-    }
+      failed: [],
+    },
   };
-  
+
   if (!destinationChannels || destinationChannels.length === 0) {
     logger.warning('No destination channels provided for forwarding');
     return result;
   }
-  
+
   // Send message to each destination channel
   for (const channelId of destinationChannels) {
     try {
       const success = await sendMessage(channelId, text);
-      
+
       if (success) {
         result.success++;
         result.channels.successful.push(channelId);
@@ -132,12 +132,12 @@ async function forwardMessage(text, destinationChannels) {
       result.channels.failed.push(channelId);
     }
   }
-  
+
   return result;
 }
 
 module.exports = {
   sendMessage,
   forwardMessage,
-  initializeSender
+  initializeSender,
 };

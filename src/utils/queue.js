@@ -68,16 +68,16 @@ async function enqueueMessage(messageData) {
       const job = await messageQueue.add(messageData, {
         // Can add job-specific options here if needed
       });
-      
+
       logger.info(`Enqueued message ${messageData.messageId} with job ID ${job.id}`);
       return job;
     } else {
       // Process immediately if queue is disabled
       logger.info(`Processing message ${messageData.messageId} immediately (queue disabled)`);
-      
+
       // Import here to avoid circular dependencies
       const { processMessage } = require('../consumer');
-      
+
       // Process the message directly
       const result = await processMessage(messageData);
       logger.info(`Direct processing result: ${JSON.stringify(result)}`);
@@ -93,5 +93,5 @@ async function enqueueMessage(messageData) {
 module.exports = {
   messageQueue,
   enqueueMessage,
-  queueEnabled
+  queueEnabled,
 };

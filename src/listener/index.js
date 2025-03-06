@@ -18,17 +18,17 @@ async function initializeListener() {
     // Initialize Telegram client
     telegramClient = await initializeClient();
     logger.info('Telegram client initialized');
-    
+
     // Ensure client is connected before continuing
     if (!telegramClient.connected) {
       logger.info('Connecting to Telegram...');
       await telegramClient.connect();
       logger.info('Connected to Telegram');
     }
-    
+
     // Start listening for new messages
     await startMessageListener();
-    
+
     // Log success
     logger.info('Telegram message listener started successfully');
   } catch (error) {
@@ -43,17 +43,17 @@ async function initializeListener() {
 async function startMessageListener() {
   try {
     logger.info('Starting to listen for new messages');
-    
+
     // Create a list of all source chat IDs to monitor
     const sourceChatIds = [];
     for (const user in channelMapping) {
       sourceChatIds.push(...Object.keys(channelMapping[user]));
     }
     logger.info(`Monitoring ${sourceChatIds.length} source channels/groups`);
-    
+
     // Add event handler for new messages - using correct import
     telegramClient.addEventHandler(handleNewMessage, new NewMessage({}));
-    
+
     // Log connected chats for verification
     await logConnectedChats();
   } catch (error) {
@@ -68,16 +68,16 @@ async function startMessageListener() {
 async function logConnectedChats() {
   try {
     logger.info('Fetching connected dialogs...');
-    
+
     // Make sure client is connected
     if (!telegramClient.connected) {
       logger.info('Reconnecting to Telegram before fetching dialogs...');
       await telegramClient.connect();
     }
-    
+
     const dialogs = await telegramClient.getDialogs({});
     logger.info(`Connected to ${dialogs.length} dialogs`);
-    
+
     // Log the first 10 dialogs for verification
     const dialogSample = dialogs.slice(0, Math.min(10, dialogs.length));
     for (const dialog of dialogSample) {
@@ -86,7 +86,7 @@ async function logConnectedChats() {
         const id = entity.id ? entity.id.toString() : 'unknown';
         const title = entity.title || 'Private Chat';
         const type = entity.className || 'Unknown';
-        
+
         logger.info(`Dialog: ${title} (ID: ${id}, Type: ${type})`);
       } catch (error) {
         logger.error(`Error processing dialog: ${error.message}`);
@@ -104,16 +104,16 @@ async function logConnectedChats() {
 async function handleNewMessage(event) {
   try {
     const message = event.message;
-    
+
     // Skip messages without text
     if (!message.text) return;
-    
+
     // Debug log raw message for troubleshooting
     logger.debug(`Raw message: ${JSON.stringify(message, null, 2).substring(0, 500)}...`);
-    
+
     // Get chat ID - corrected for the actual message format
     let chatId;
-    
+
     // Try various ways to get the chat ID based on the actual message structure
     if (message.peerId && typeof message.peerId === 'object') {
       // For newer Telegram client versions
@@ -131,7 +131,7 @@ async function handleNewMessage(event) {
       // Another possible format
       chatId = message.chat.id.toString();
     }
-    
+
     // Handle thread case if applicable
     if (message.groupedId || (message.replyTo && message.replyTo.replyToMsgId)) {
       const threadId = message.groupedId || message.replyTo.replyToMsgId;
@@ -140,26 +140,28 @@ async function handleNewMessage(event) {
         chatId = `${chatId}/${threadId}`;
       }
     }
-    
+
     if (!chatId) {
       logger.warn(`Could not determine chat ID for message: ${message.text.substring(0, 100)}`);
       return;
     }
-    
+
     // Debug log the processed message
-    logger.debug(`Processed message: ${JSON.stringify({
-      text: message.text.substring(0, 100) + (message.text.length > 100 ? '...' : ''),
-      chatId,
-      messageId: message.id
-    })}`);
-    
+    logger.debug(
+      `Processed message: ${JSON.stringify({
+        text: message.text.substring(0, 100) + (message.text.length > 100 ? '...' : ''),
+        chatId,
+        messageId: message.id,
+      })}`,
+    );
+
     // Check if this chat is in our mapping
     if (isChatInMapping(chatId)) {
       logger.info(`Received message from chat ${chatId}`);
-      
+
       // Get message info
-      const sender = message.sender ? (message.sender.username || message.sender.id) : 'Unknown';
-      
+      const sender = message.sender ? message.sender.username || message.sender.id : 'Unknown';
+
       // Prepare message data for processing
       const messageData = {
         messageId: message.id.toString(),
@@ -170,7 +172,7 @@ async function handleNewMessage(event) {
         date: new Date(message.date * 1000).toISOString(),
         destinationChannels: getDestinationChannels(chatId),
       };
-      
+
       // Enqueue message for processing
       await enqueueMessage(messageData);
     } else {

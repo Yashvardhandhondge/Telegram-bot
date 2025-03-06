@@ -11,39 +11,39 @@ const config = {
     port: process.env.PORT || 3000,
     env: process.env.NODE_ENV || 'development',
   },
-  
+
   // Telegram configuration
   telegram: {
     apiId: parseInt(process.env.TELEGRAM_API_ID),
     apiHash: process.env.TELEGRAM_API_HASH,
     sessionString: process.env.TELEGRAM_SESSION_STRING,
   },
-  
+
   // AI Provider configuration
   ai: {
     provider: process.env.AI_PROVIDER || 'openai', // openai or gemini
     apiKey: process.env.AI_API_KEY,
   },
-  
+
   // Redis configuration
   redis: {
     host: process.env.REDIS_HOST || 'localhost',
     port: parseInt(process.env.REDIS_PORT) || 6379,
     password: process.env.REDIS_PASSWORD || undefined,
   },
-  
+
   // Queue configuration
   queue: {
     name: process.env.MESSAGE_QUEUE_NAME || 'telegram_messages',
     maxRetries: parseInt(process.env.MAX_QUEUE_RETRIES) || 3,
     processTimeout: parseInt(process.env.MESSAGE_PROCESS_TIMEOUT) || 300,
   },
-  
+
   // Logging configuration
   logging: {
     level: process.env.LOG_LEVEL || 'info',
   },
-  
+
   // Message types
   messageTypes: {
     SIGNAL: 'crypto_signal',
@@ -51,7 +51,7 @@ const config = {
     ALERT: 'alert',
     NOISE: 'noise',
   },
-  
+
   // AI Prompts
   prompts: {
     classification: `
@@ -69,7 +69,7 @@ const config = {
 
       Only respond with one of the category names: 'crypto_signal', 'crypto_news', 'alert', or 'noise'.
     `,
-    
+
     formatting: {
       crypto_signal: `
         Format the following crypto trading signal into a clean, standardized format.
@@ -86,7 +86,7 @@ const config = {
         
         Format as a concise, professional trading signal with emoji indicators. Do not include any personal commentary or conversation outside the signal details.
       `,
-      
+
       crypto_news: `
         Format the following crypto news item into a clear, concise summary.
         Include:
@@ -99,7 +99,7 @@ const config = {
         
         Format as a brief, factual news update suitable for traders. Add relevant emojis if appropriate.
       `,
-      
+
       alert: `
         Format this alert message to highlight its urgency and key information.
         
@@ -110,7 +110,7 @@ const config = {
       `,
     },
   },
-  
+
   /**
    * Load channel mapping from JSON file
    * @returns {Object} Channel mapping object
