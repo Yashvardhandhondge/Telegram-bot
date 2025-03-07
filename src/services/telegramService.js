@@ -71,24 +71,60 @@ async function sendMessage(chatId, text) {
     // Parse the chat ID
     const { chatId: parsedChatId, threadId } = parseChatId(chatId);
     
-    // Convert to integer (Telegram API expects numeric IDs)
-    const numericChatId = parseInt(parsedChatId);
+    // Clean up the chat ID - remove minus sign for consistency
+    const cleanChatId = parsedChatId.startsWith('-') ? parsedChatId.substring(1) : parsedChatId;
     
-    // Create message parameters
-    const params = {
-      message: text
-    };
+    // Try different formats of the chat ID
+    const chatIdFormats = [
+      // As is (string)
+      parsedChatId,
+      // Raw ID with no prefix
+      cleanChatId,
+      // With minus prefix
+      `-${cleanChatId}`,
+      // As number
+      parseInt(cleanChatId),
+      // As negative number
+      -parseInt(cleanChatId)
+    ];
     
-    // Add replyToMsgId if thread is specified
-    if (threadId) {
-      params.replyToMsgId = threadId;
+    logger.debug(`Trying to send message to channel ${chatId} using multiple formats`);
+    
+    let success = false;
+    let lastError = null;
+    
+    // Try each format until one works
+    for (const idFormat of chatIdFormats) {
+      try {
+        logger.debug(`Trying to send to chat ID format: ${idFormat}`);
+        
+        // Create message parameters
+        const params = {
+          message: text
+        };
+        
+        // Add replyToMsgId if thread is specified
+        if (threadId) {
+          params.replyToMsgId = threadId;
+        }
+        
+        // Send the message
+        await client.sendMessage(idFormat, params);
+        
+        logger.info(`Sent message to chat ${chatId} using format ${idFormat}`);
+        success = true;
+        break;
+      } catch (error) {
+        lastError = error;
+        logger.debug(`Failed to send with format ${idFormat}: ${error.message}`);
+      }
     }
     
-    // Send the message using the numeric chat ID
-    await client.sendMessage(numericChatId, params);
+    if (!success && lastError) {
+      throw lastError;
+    }
     
-    logger.info(`Sent message to chat ${chatId}`);
-    return true;
+    return success;
   } catch (error) {
     logger.error(`Error sending message to ${chatId}: ${error.message}`, { error });
     return false;

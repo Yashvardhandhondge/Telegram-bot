@@ -5,6 +5,7 @@ const { initializeClient, sendPing } = require('../utils/telegramAuth');
 const config = require('../config');
 const logger = require('../utils/logger');
 const { enqueueMessage } = require('../utils/queue');
+const { findMatchingKey } = require('../utils/chatIdMapper');
 
 // Global variables
 let telegramClient;
@@ -137,9 +138,9 @@ async function handleNewMessage(event) {
     if (message.peerId && typeof message.peerId === 'object') {
       // For newer Telegram client versions
       if (message.peerId.channelId) {
-        chatId = `-100${message.peerId.channelId.toString()}`;
+        chatId = `${message.peerId.channelId.toString()}`;
       } else if (message.peerId.chatId) {
-        chatId = `-${message.peerId.chatId.toString()}`;
+        chatId = `${message.peerId.chatId.toString()}`;
       } else if (message.peerId.userId) {
         chatId = message.peerId.userId.toString();
       }
@@ -165,11 +166,27 @@ async function handleNewMessage(event) {
       return;
     }
 
+    // Log normalized formats for debugging
+    const { normalizeChannelId } = require('../utils/chatIdMapper');
+    const normalizedFormats = normalizeChannelId(chatId);
+    logger.debug(`Normalized formats for chat ID ${chatId}: ${JSON.stringify(normalizedFormats)}`);
+
+    // Check mapping using findMatchingKey
+    const matchedKey = findMatchingKey(channelMapping['@user1'], chatId);
+    if (matchedKey) {
+      logger.info(`Matched key for chat ${chatId} is ${matchedKey}`);
+    } else {
+      logger.warn(`No matching key found for chat ${chatId} with normalized formats ${JSON.stringify(normalizedFormats)}`);
+    }
+
     // Debug log the processed message
     logger.debug(
       `Processed message from ${chatId}: ${message.text.substring(0, 100)}${message.text.length > 100 ? '...' : ''}`
     );
 
+    // Debug log available mappings
+    logger.debug(`Available mappings: ${JSON.stringify(Object.keys(channelMapping['@user1']))}`);
+    
     // Check if this chat is in our mapping
     if (isChatInMapping(chatId)) {
       logger.info(`Received message from chat ${chatId}: ${message.text.substring(0, 30)}...`);
@@ -210,7 +227,8 @@ async function handleNewMessage(event) {
 function isChatInMapping(chatId) {
   try {
     for (const user in channelMapping) {
-      if (Object.keys(channelMapping[user]).includes(chatId)) {
+      const matchedKey = findMatchingKey(channelMapping[user], chatId);
+      if (matchedKey) {
         return true;
       }
     }
@@ -228,12 +246,21 @@ function isChatInMapping(chatId) {
  */
 function getDestinationChannels(sourceChatId) {
   try {
+    let destinationChannels = [];
     for (const user in channelMapping) {
-      if (sourceChatId in channelMapping[user]) {
-        return channelMapping[user][sourceChatId];
+      const matchedKey = findMatchingKey(channelMapping[user], sourceChatId);
+      if (matchedKey) {
+        destinationChannels = destinationChannels.concat(channelMapping[user][matchedKey]);
       }
     }
-    return [];
+    // Remove duplicates
+    destinationChannels = Array.from(new Set(destinationChannels));
+    if (destinationChannels.length === 0) {
+      logger.warn(`No destination channels found for source chat ID ${sourceChatId}`);
+    } else {
+      logger.debug(`For source chat ID ${sourceChatId}, destination channels: ${JSON.stringify(destinationChannels)}`);
+    }
+    return destinationChannels;
   } catch (error) {
     logger.error(`Error getting destination channels: ${error.message}`, { error });
     return [];
