@@ -7,6 +7,62 @@ if (!config.ai.apiKey) {
   logger.warn('AI_API_KEY not provided. AI classification and formatting will be limited.');
 }
 
+// Add rate limiting to prevent 429 errors
+let lastRequestTime = 0;
+const MIN_REQUEST_INTERVAL = 1000; // 1 second minimum between requests
+
+/**
+ * Helper function to wait for rate limiting
+ * @returns {Promise<void>} Promise that resolves when ready to make a request
+ */
+async function waitForRateLimit() {
+  const now = Date.now();
+  const timeSinceLastRequest = now - lastRequestTime;
+  
+  if (timeSinceLastRequest < MIN_REQUEST_INTERVAL) {
+    const waitTime = MIN_REQUEST_INTERVAL - timeSinceLastRequest;
+    logger.debug(`Rate limiting: waiting ${waitTime}ms before next AI request`);
+    await new Promise(resolve => setTimeout(resolve, waitTime));
+  }
+  
+  lastRequestTime = Date.now();
+}
+
+/**
+ * Retry a function with exponential backoff
+ * @param {Function} fn Function to retry
+ * @param {number} maxRetries Maximum number of retries
+ * @returns {Promise<any>} Result of the function
+ */
+async function withRetry(fn, maxRetries = 3) {
+  let lastError;
+  
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      // Wait for rate limiting before each attempt
+      await waitForRateLimit();
+      
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      
+      // Check if it's a rate limit error
+      if (error.response && error.response.status === 429) {
+        const retryAfter = error.response.headers['retry-after'] || (2 ** attempt * 1000);
+        logger.warn(`Rate limit hit, retrying after ${retryAfter}ms (attempt ${attempt + 1}/${maxRetries})`);
+        await new Promise(resolve => setTimeout(resolve, retryAfter));
+      } else {
+        // For other errors, use exponential backoff
+        const backoff = 2 ** attempt * 1000;
+        logger.warn(`Request failed, retrying after ${backoff}ms (attempt ${attempt + 1}/${maxRetries}): ${error.message}`);
+        await new Promise(resolve => setTimeout(resolve, backoff));
+      }
+    }
+  }
+  
+  throw lastError;
+}
+
 /**
  * Classify a message using Gemini AI
  * @param {string} messageText Message text to classify
@@ -29,11 +85,11 @@ async function classifyMessage(messageText) {
     
     // Use the appropriate AI provider
     if (config.ai.provider.toLowerCase() === 'gemini') {
-      const result = await classifyWithGemini(prompt);
+      const result = await withRetry(() => classifyWithGemini(prompt));
       logger.info(`Classified message as: ${result}`);
       return result;
     } else if (config.ai.provider.toLowerCase() === 'openai') {
-      const result = await classifyWithOpenAI(prompt);
+      const result = await withRetry(() => classifyWithOpenAI(prompt));
       logger.info(`Classified message as: ${result}`);
       return result;
     } else {
@@ -43,8 +99,8 @@ async function classifyMessage(messageText) {
     }
   } catch (error) {
     logger.error(`Error classifying message: ${error.message}`, { error });
-    // Default to alert to err on the side of caution
-    return 'alert';
+    // Fallback to basic classification if AI fails
+    return basicClassification(messageText);
   }
 }
 
@@ -128,7 +184,7 @@ async function classifyWithOpenAI(prompt) {
 async function classifyWithGemini(prompt) {
   try {
     // Prepare request to Gemini API
-    const url = `https://generativelanguage.googleapis.com/v1/models/${config.ai.model || 'gemini-pro'}:generateContent`;
+    const url = `https://generativelanguage.googleapis.com/v1/models/${config.ai.model || 'gemini-2.0-flash'}:generateContent`;
     const headers = {
       'Content-Type': 'application/json',
       'x-goog-api-key': config.ai.apiKey
@@ -205,23 +261,28 @@ async function formatMessage(messageText, messageType) {
       return `🔄 Forwarded: ${messageType.toUpperCase()}\n\n${messageText}`;
     }
     
-    // Use the appropriate AI provider
-    if (config.ai.provider.toLowerCase() === 'gemini') {
-      const result = await formatWithGemini(prompt);
-      logger.debug(`Formatted ${messageType} message`);
-      return result;
-    } else if (config.ai.provider.toLowerCase() === 'openai') {
-      const result = await formatWithOpenAI(prompt);
-      logger.debug(`Formatted ${messageType} message`);
-      return result;
-    } else {
-      logger.error(`Unknown AI provider: ${config.ai.provider}`);
-      return `🔄 Forwarded: ${messageType.toUpperCase()}\n\n${messageText}`;
+    try {
+      // Use the appropriate AI provider with retry logic
+      if (config.ai.provider.toLowerCase() === 'gemini') {
+        const result = await withRetry(() => formatWithGemini(prompt));
+        logger.debug(`Formatted ${messageType} message`);
+        return result;
+      } else if (config.ai.provider.toLowerCase() === 'openai') {
+        const result = await withRetry(() => formatWithOpenAI(prompt));
+        logger.debug(`Formatted ${messageType} message`);
+        return result;
+      } else {
+        logger.error(`Unknown AI provider: ${config.ai.provider}`);
+        return basicFormatting(messageText, messageType);
+      }
+    } catch (error) {
+      logger.error(`AI formatting failed after retries: ${error.message}`);
+      return basicFormatting(messageText, messageType);
     }
   } catch (error) {
     logger.error(`Error formatting message: ${error.message}`, { error });
     // Return original message with type prefix if formatting fails
-    return `🔄 Forwarded: ${messageType.toUpperCase()}\n\n${messageText}`;
+    return basicFormatting(messageText, messageType);
   }
 }
 
@@ -234,13 +295,13 @@ async function formatMessage(messageText, messageType) {
 function basicFormatting(messageText, messageType) {
   switch (messageType) {
     case 'crypto_signal':
-      return `📊 TRADING SIGNAL\n\n${messageText}`;
+      return `#Signal\n📈 TRADING SIGNAL\n\n${messageText}`;
     
     case 'crypto_news':
-      return `📰 CRYPTO NEWS\n\n${messageText}`;
+      return `#News\n📰 CRYPTO NEWS\n\n${messageText}`;
     
     case 'alert':
-      return `🚨 ALERT 🚨\n\n${messageText}`;
+      return `#Alert\n🚨 ALERT 🚨\n\n${messageText}`;
     
     default:
       return `🔄 Forwarded Message:\n\n${messageText}`;
@@ -285,7 +346,7 @@ async function formatWithOpenAI(prompt) {
 async function formatWithGemini(prompt) {
   try {
     // Prepare request to Gemini API
-    const url = `https://generativelanguage.googleapis.com/v1/models/${config.ai.model || 'gemini-pro'}:generateContent`;
+    const url = `https://generativelanguage.googleapis.com/v1/models/${config.ai.model || 'gemini-2.0-flash'}:generateContent`;
     const headers = {
       'Content-Type': 'application/json',
       'x-goog-api-key': config.ai.apiKey

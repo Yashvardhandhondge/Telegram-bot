@@ -1,19 +1,22 @@
 const { TelegramClient } = require('telegram');
 const { NewMessage } = require('telegram/events');
-const { Api } = require('telegram');
 const { initializeClient, sendPing } = require('../utils/telegramAuth');
 const config = require('../config');
 const logger = require('../utils/logger');
 const { enqueueMessage } = require('../utils/queue');
-const { findMatchingKey } = require('../utils/chatIdMapper');
+const { normalizeChannelId } = require('../utils/chatIdMapper');
 
 // Global variables
 let telegramClient;
 const channelMapping = config.loadChannelMapping();
 logger.info(`Loaded mapping for ${Object.keys(channelMapping).length} users`);
 
+// Track processed messages to avoid duplicates
+const processedMessages = new Set();
+const MAX_PROCESSED_CACHE = 1000; // Maximum number of message IDs to cache
+
 /**
- * Initialize the Telegram client and start listening for messages
+ * Initialize the Telegram client and start polling for messages
  */
 async function initializeListener() {
   try {
@@ -31,15 +34,27 @@ async function initializeListener() {
     // Verify connection with a ping
     try {
       await sendPing(telegramClient);
+      logger.info('Ping successful');
     } catch (error) {
       logger.error(`Ping failed: ${error.message}`);
       // Continue anyway, we'll try to recover
     }
 
-    // Start listening for new messages
-    await startMessageListener();
+    // Still register event handler as backup
+    telegramClient.addEventHandler(async (event) => {
+      if (event.message && event.message.text) {
+        await handleMessage(event.message);
+      }
+    }, new NewMessage({}));
+    
+    logger.info('Event handler registered as backup');
 
-    // Log success
+    // Start polling mechanism
+    startPolling();
+    
+    // Start connection maintenance
+    startConnectionMaintenance();
+    
     logger.info('Telegram message listener started successfully');
   } catch (error) {
     logger.error(`Failed to initialize Telegram listener: ${error.message}`, { error });
@@ -48,223 +63,238 @@ async function initializeListener() {
 }
 
 /**
- * Start listening for new messages
+ * Start polling for new messages
  */
-async function startMessageListener() {
-  try {
-    logger.info('Starting to listen for new messages');
-
-    // Create a list of all source chat IDs to monitor
-    const sourceChatIds = [];
-    for (const user in channelMapping) {
-      sourceChatIds.push(...Object.keys(channelMapping[user]));
-    }
-    logger.info(`Monitoring ${sourceChatIds.length} source channels/groups`);
-
-    // Add event handler for new messages - using correct import
-    telegramClient.addEventHandler(handleNewMessage, new NewMessage({}));
-
-    // Log connected chats for verification
-    await logConnectedChats();
-  } catch (error) {
-    logger.error(`Error starting message listener: ${error.message}`, { error });
-    throw error;
+function startPolling() {
+  // Use a list of all source chats from the mapping
+  const sourceChats = new Set();
+  
+  for (const user in channelMapping) {
+    Object.keys(channelMapping[user]).forEach(key => {
+      // Format properly for Telegram API
+      const cleanKey = key.toString().replace(/^-/, '');
+      if (parseInt(cleanKey) > 100) {
+        // Group/channel IDs usually need a minus prefix
+        sourceChats.add(`-${cleanKey}`);
+      } else {
+        sourceChats.add(cleanKey);
+      }
+    });
   }
+  
+  logger.info(`Will poll ${sourceChats.size} source chats: ${JSON.stringify(Array.from(sourceChats))}`);
+  
+  // Start polling each source chat
+  const pollInterval = setInterval(async () => {
+    try {
+      if (!telegramClient || !telegramClient.connected) {
+        logger.warn('Client not connected, skipping poll');
+        return;
+      }
+      
+      for (const chatId of sourceChats) {
+        try {
+          await pollChat(chatId);
+        } catch (error) {
+          logger.error(`Error polling chat ${chatId}: ${error.message}`);
+        }
+      }
+    } catch (error) {
+      logger.error(`Error in poll interval: ${error.message}`);
+    }
+  }, 5000); // Poll every 5 seconds
+  
+  // Clean up on exit
+  process.on('exit', () => {
+    clearInterval(pollInterval);
+  });
 }
 
 /**
- * Log all connected chats for verification
+ * Poll a chat for new messages
+ * @param {string} chatId Chat ID to poll
  */
-async function logConnectedChats() {
+async function pollChat(chatId) {
   try {
-    logger.info('Fetching connected dialogs...');
-
-    // Make sure client is connected
-    if (!telegramClient.connected) {
-      logger.info('Reconnecting to Telegram before fetching dialogs...');
-      await telegramClient.connect();
-    }
-
-    // Try with increased timeout
-    const dialogs = await Promise.race([
-      telegramClient.getDialogs({}),
-      new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Timeout fetching dialogs')), 20000)
-      )
-    ]);
+    // Get latest messages from this chat
+    const messages = await telegramClient.getMessages(chatId, {
+      limit: 5 // Get latest 5 messages
+    });
     
-    logger.info(`Connected to ${dialogs.length} dialogs`);
-
-    // Log the first 10 dialogs for verification
-    const dialogSample = dialogs.slice(0, Math.min(10, dialogs.length));
-    for (const dialog of dialogSample) {
+    if (!messages || messages.length === 0) {
+      return;
+    }
+    
+    // Process each message (newest first)
+    for (const message of messages) {
       try {
-        const entity = dialog.entity;
-        const id = entity.id ? entity.id.toString() : 'unknown';
-        const title = entity.title || 'Private Chat';
-        const type = entity.className || 'Unknown';
-
-        logger.info(`Dialog: ${title} (ID: ${id}, Type: ${type})`);
-      } catch (error) {
-        logger.error(`Error processing dialog: ${error.message}`);
+        // Skip messages without text or already processed
+        if (!message || !message.text || processedMessages.has(message.id.toString())) {
+          continue;
+        }
+        
+        // Handle this message
+        await handleMessage(message);
+        
+        // Mark as processed
+        processedMessages.add(message.id.toString());
+        
+        // Clean up processed messages cache if needed
+        if (processedMessages.size > MAX_PROCESSED_CACHE) {
+          const toRemove = Array.from(processedMessages).slice(0, 100);
+          toRemove.forEach(msgId => processedMessages.delete(msgId));
+        }
+      } catch (messageError) {
+        logger.error(`Error handling polled message: ${messageError.message}`);
       }
     }
   } catch (error) {
-    logger.error(`Error fetching dialogs: ${error.message}`, { error });
-    logger.warn('Continuing without dialog information');
-    // Don't throw error, let the listener start anyway
+    logger.error(`Error polling chat ${chatId}: ${error.message}`);
   }
 }
 
 /**
- * Handle new incoming messages
- * @param {Object} event Telegram event object
+ * Handle a message from Telegram
+ * @param {Object} message Telegram message object
  */
-async function handleNewMessage(event) {
+async function handleMessage(message) {
   try {
-    const message = event.message;
-
-    // Skip messages without text
-    if (!message.text) return;
-
-    // Debug log raw message structure (just first level keys to avoid huge logs)
-    const messageKeys = Object.keys(message);
-    logger.debug(`Message received with keys: ${messageKeys.join(', ')}`);
-
-    // Get chat ID - corrected for the actual message format
-    let chatId;
-
-    // Try various ways to get the chat ID based on the actual message structure
-    if (message.peerId && typeof message.peerId === 'object') {
-      // For newer Telegram client versions
+    // Skip if already processed
+    if (processedMessages.has(message.id.toString())) {
+      return;
+    }
+    
+    logger.info(`📨 Processing message ${message.id}`);
+    
+    // Extract chat ID
+    let chatId = null;
+    
+    // Try to get chat ID from peer info
+    if (message.peerId) {
       if (message.peerId.channelId) {
-        chatId = `${message.peerId.channelId.toString()}`;
+        chatId = message.peerId.channelId.toString();
       } else if (message.peerId.chatId) {
-        chatId = `${message.peerId.chatId.toString()}`;
+        chatId = message.peerId.chatId.toString();
       } else if (message.peerId.userId) {
         chatId = message.peerId.userId.toString();
       }
-    } else if (message.chatId) {
-      // Direct chat ID if available
-      chatId = message.chatId.toString();
-    } else if (message.chat && message.chat.id) {
-      // Another possible format
+    }
+    
+    // If we couldn't get from peerId, try getting from chat
+    if (!chatId && message.chat && message.chat.id) {
       chatId = message.chat.id.toString();
     }
-
-    // Handle thread case if applicable
-    if (message.groupedId || (message.replyTo && message.replyTo.replyToMsgId)) {
-      const threadId = message.groupedId || message.replyTo.replyToMsgId;
-      // Some channel formats might already include the thread ID
-      if (!chatId.includes('/')) {
-        chatId = `${chatId}/${threadId}`;
-      }
-    }
-
+    
     if (!chatId) {
-      logger.warn(`Could not determine chat ID for message: ${message.text.substring(0, 100)}`);
+      logger.warn(`Could not determine chat ID for message ${message.id}`);
       return;
     }
-
-    // Log normalized formats for debugging
-    const { normalizeChannelId } = require('../utils/chatIdMapper');
-    const normalizedFormats = normalizeChannelId(chatId);
-    logger.debug(`Normalized formats for chat ID ${chatId}: ${JSON.stringify(normalizedFormats)}`);
-
-    // Check mapping using findMatchingKey
-    const matchedKey = findMatchingKey(channelMapping['@user1'], chatId);
-    if (matchedKey) {
-      logger.info(`Matched key for chat ${chatId} is ${matchedKey}`);
-    } else {
-      logger.warn(`No matching key found for chat ${chatId} with normalized formats ${JSON.stringify(normalizedFormats)}`);
-    }
-
-    // Debug log the processed message
-    logger.debug(
-      `Processed message from ${chatId}: ${message.text.substring(0, 100)}${message.text.length > 100 ? '...' : ''}`
-    );
-
-    // Debug log available mappings
-    logger.debug(`Available mappings: ${JSON.stringify(Object.keys(channelMapping['@user1']))}`);
     
-    // Check if this chat is in our mapping
-    if (isChatInMapping(chatId)) {
-      logger.info(`Received message from chat ${chatId}: ${message.text.substring(0, 30)}...`);
-
-      // Get message info
-      const sender = message.sender ? message.sender.username || message.sender.id : 'Unknown';
-
-      // Prepare message data for processing
-      const messageData = {
-        messageId: message.id.toString(),
-        chatId: chatId,
-        text: message.text,
-        senderId: message.fromId ? message.fromId.toString() : null,
-        senderUsername: sender,
-        date: new Date(message.date * 1000).toISOString(),
-        destinationChannels: getDestinationChannels(chatId),
-      };
-
-      // Enqueue message for processing
-      await enqueueMessage(messageData);
-    } else {
-      // Log some useful information for debugging mapping issues
-      logger.debug(`Message from unmapped chat ${chatId} (not in our mapping)`);
-      if (config.logging.level === 'debug') {
-        logger.debug(`Available mappings: ${JSON.stringify(channelMapping)}`);
+    logger.info(`📝 Message ${message.id} from chat ${chatId}`);
+    
+    // Generate normalized formats for matching
+    const normalizedFormats = normalizeChannelId(chatId);
+    
+    // Match against our mapping
+    let destinationChannels = [];
+    let foundMatch = false;
+    
+    for (const user in channelMapping) {
+      // Try each format against this user's mapping
+      for (const format of normalizedFormats) {
+        if (format in channelMapping[user]) {
+          foundMatch = true;
+          const destinations = channelMapping[user][format];
+          logger.info(`✅ Match found in user ${user} with key ${format}`);
+          
+          if (Array.isArray(destinations)) {
+            destinationChannels = destinationChannels.concat(destinations);
+          }
+        }
       }
     }
+    
+    // Remove duplicates
+    destinationChannels = [...new Set(destinationChannels)];
+    
+    if (!foundMatch || destinationChannels.length === 0) {
+      logger.info(`❌ No destination channels found for chat ${chatId}`);
+      return;
+    }
+    
+    logger.info(`🎯 Found ${destinationChannels.length} destination channels: ${JSON.stringify(destinationChannels)}`);
+    
+    // Format destination channels (ensure they have correct prefix)
+    const formattedDestinations = destinationChannels.map(dest => {
+      const cleanDest = dest.toString().replace(/^-/, '');
+      return parseInt(cleanDest) > 100 ? `-${cleanDest}` : cleanDest;
+    });
+    
+    // Prepare message data
+    const messageData = {
+      messageId: message.id.toString(),
+      chatId: chatId,
+      text: message.text,
+      senderId: message.fromId ? message.fromId.toString() : null,
+      senderUsername: message.sender ? message.sender.username || message.sender.id : 'Unknown',
+      date: new Date(message.date * 1000).toISOString(),
+      destinationChannels: formattedDestinations,
+    };
+    
+    // Process the message and don't wait for it to complete
+    logger.info(`⚙️ Enqueueing message ${message.id} for processing`);
+    enqueueMessage(messageData)
+      .then(result => {
+        logger.info(`✅ Enqueue result for message ${message.id}: ${JSON.stringify(result)}`);
+        
+        // Mark as processed to avoid duplicates
+        processedMessages.add(message.id.toString());
+      })
+      .catch(error => {
+        logger.error(`❌ Error enqueueing message ${message.id}: ${error.message}`);
+      });
   } catch (error) {
     logger.error(`Error handling message: ${error.message}`, { error });
   }
 }
 
 /**
- * Check if a chat is in our mapping
- * @param {string} chatId Chat ID to check
- * @returns {boolean} True if chat is in mapping, false otherwise
+ * Start connection maintenance with periodic pings and reconnection
  */
-function isChatInMapping(chatId) {
-  try {
-    for (const user in channelMapping) {
-      const matchedKey = findMatchingKey(channelMapping[user], chatId);
-      if (matchedKey) {
-        return true;
+function startConnectionMaintenance() {
+  // Set up ping interval (every 30 seconds)
+  const pingInterval = setInterval(async () => {
+    try {
+      if (!telegramClient) {
+        logger.warn('Telegram client not initialized');
+        return;
       }
-    }
-    return false;
-  } catch (error) {
-    logger.error(`Error checking chat mapping: ${error.message}`, { error });
-    return false;
-  }
-}
-
-/**
- * Get destination channels for a source chat
- * @param {string} sourceChatId Source chat ID
- * @returns {string[]} Array of destination channel IDs
- */
-function getDestinationChannels(sourceChatId) {
-  try {
-    let destinationChannels = [];
-    for (const user in channelMapping) {
-      const matchedKey = findMatchingKey(channelMapping[user], sourceChatId);
-      if (matchedKey) {
-        destinationChannels = destinationChannels.concat(channelMapping[user][matchedKey]);
+      
+      if (!telegramClient.connected) {
+        logger.warn('Client disconnected, attempting to reconnect...');
+        try {
+          await telegramClient.connect();
+          logger.info('Reconnected successfully');
+        } catch (connectError) {
+          logger.error(`Failed to reconnect: ${connectError.message}`);
+        }
       }
+      
+      try {
+        await sendPing(telegramClient);
+        logger.debug('Ping successful');
+      } catch (pingError) {
+        logger.error(`Ping failed: ${pingError.message}`);
+      }
+    } catch (error) {
+      logger.error(`Error in ping interval: ${error.message}`);
     }
-    // Remove duplicates
-    destinationChannels = Array.from(new Set(destinationChannels));
-    if (destinationChannels.length === 0) {
-      logger.warn(`No destination channels found for source chat ID ${sourceChatId}`);
-    } else {
-      logger.debug(`For source chat ID ${sourceChatId}, destination channels: ${JSON.stringify(destinationChannels)}`);
-    }
-    return destinationChannels;
-  } catch (error) {
-    logger.error(`Error getting destination channels: ${error.message}`, { error });
-    return [];
-  }
+  }, 30000);
+  
+  // Clean up interval on process exit
+  process.on('exit', () => {
+    clearInterval(pingInterval);
+  });
 }
 
 // Start the listener when this module is loaded

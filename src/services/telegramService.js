@@ -58,6 +58,24 @@ function parseChatId(chatId) {
 }
 
 /**
+ * Ensure chat ID has the correct format for Telegram API
+ * @param {string} chatId Raw chat ID
+ * @returns {string} Formatted chat ID with correct prefix
+ */
+function formatChatId(chatId) {
+  // Remove any existing minus sign
+  const cleanId = chatId.toString().replace(/^-/, '');
+  
+  // Add minus sign if it's a group/channel (IDs typically over 100)
+  // This is a heuristic that generally works for Telegram group/channel IDs
+  if (parseInt(cleanId) > 100) {
+    return `-${cleanId}`;
+  }
+  
+  return cleanId;
+}
+
+/**
  * Send a message to a Telegram chat
  * @param {string} chatId Chat ID to send the message to
  * @param {string} text Message text to send
@@ -80,11 +98,11 @@ async function sendMessage(chatId, text) {
       parsedChatId,
       // Raw ID with no prefix
       cleanChatId,
-      // With minus prefix
+      // With minus prefix (most common for groups/channels)
       `-${cleanChatId}`,
       // As number
       parseInt(cleanChatId),
-      // As negative number
+      // As negative number (for groups/channels)
       -parseInt(cleanChatId)
     ];
     
@@ -121,7 +139,36 @@ async function sendMessage(chatId, text) {
     }
     
     if (!success && lastError) {
-      throw lastError;
+      // Try one more approach - get entity first and then send
+      try {
+        logger.debug(`Trying alternative approach - resolving entity first for ${formatChatId(cleanChatId)}`);
+        
+        // Try to resolve the entity first (important in Docker environment)
+        const formattedId = formatChatId(cleanChatId);
+        const entity = await client.getEntity(formattedId);
+        
+        if (entity) {
+          logger.info(`Successfully resolved entity for ${formattedId}`);
+          
+          // Create message parameters
+          const params = {
+            message: text
+          };
+          
+          // Add replyToMsgId if thread is specified
+          if (threadId) {
+            params.replyToMsgId = threadId;
+          }
+          
+          // Send using the resolved entity
+          await client.sendMessage(entity, params);
+          logger.info(`Sent message to chat ${chatId} using resolved entity`);
+          return true;
+        }
+      } catch (entityError) {
+        logger.error(`Failed to resolve entity: ${entityError.message}`);
+        throw lastError; // Throw the original error
+      }
     }
     
     return success;
@@ -148,21 +195,30 @@ async function forwardMessage(text, destinationChannels) {
   };
   
   if (!destinationChannels || destinationChannels.length === 0) {
-    logger.warning('No destination channels provided for forwarding');
+    logger.warn('No destination channels provided for forwarding');
     return result;
   }
+  
+  logger.info(`🚀 Forwarding message to ${destinationChannels.length} channels: ${JSON.stringify(destinationChannels)}`);
   
   // Send message to each destination channel
   for (const channelId of destinationChannels) {
     try {
-      const success = await sendMessage(channelId, text);
+      // In Docker environment, ensure we're using the right format
+      // const formattedChannelId = channelId.toString().startsWith('-') ? channelId : `-${channelId}`;
+      const formattedChannelId = channelId.toString().startsWith('-') ? channelId : `${channelId}`;
+      logger.info(`Attempting to forward to channel: ${formattedChannelId}`);
+      
+      const success = await sendMessage(formattedChannelId, text);
       
       if (success) {
         result.success++;
         result.channels.successful.push(channelId);
+        logger.info(`✅ Successfully forwarded to channel ${channelId}`);
       } else {
         result.failure++;
         result.channels.failed.push(channelId);
+        logger.warn(`❌ Failed to forward to channel ${channelId}`);
       }
     } catch (error) {
       logger.error(`Error forwarding to channel ${channelId}: ${error.message}`, { error });
@@ -171,6 +227,7 @@ async function forwardMessage(text, destinationChannels) {
     }
   }
   
+  logger.info(`📊 Forwarding results: ${result.success} successful, ${result.failure} failed`);
   return result;
 }
 

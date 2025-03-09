@@ -65,8 +65,17 @@ try {
  */
 async function enqueueMessage(messageData) {
   try {
+    if (!messageData || !messageData.messageId) {
+      logger.error('Invalid message data provided to enqueueMessage');
+      return { success: false, error: 'Invalid message data' };
+    }
+    
+    logger.info(`🔍 Processing message ${messageData.messageId} from ${messageData.chatId}`);
+    logger.info(`Message has ${messageData.destinationChannels.length} destination channels: ${JSON.stringify(messageData.destinationChannels)}`);
+    
     // If queue is enabled, use it
     if (queueEnabled && messageQueue) {
+      logger.info(`Adding message ${messageData.messageId} to queue`);
       const job = await messageQueue.add(messageData, {
         // Can add job-specific options here if needed
       });
@@ -78,45 +87,58 @@ async function enqueueMessage(messageData) {
       logger.info(`Processing message ${messageData.messageId} immediately (queue disabled)`);
       
       try {
-        // Import here to avoid circular dependencies
-        const consumer = require('../consumer');
+        const telegramService = require('../services/telegramService');
+        const aiService = require('../services/aiService');
         
-        // Process the message directly if consumer exists
-        if (consumer && typeof consumer.processMessage === 'function') {
-          const result = await consumer.processMessage(messageData);
-          logger.info(`Direct processing result: ${JSON.stringify(result)}`);
-          return result;
-        } else {
-          // Basic forwarding without full processing
-          const telegramService = require('../services/telegramService');
-          
-          if (messageData.destinationChannels && messageData.destinationChannels.length > 0) {
-            const formattedMessage = `🔄 Forwarded:\n\n${messageData.text}`;
-            
-            for (const channelId of messageData.destinationChannels) {
-              try {
-                await telegramService.sendMessage(channelId, formattedMessage);
-                logger.info(`Directly forwarded message to ${channelId}`);
-              } catch (error) {
-                logger.error(`Error forwarding to ${channelId}: ${error.message}`);
-              }
-            }
-            
-            return { success: true, directForward: true };
-          } else {
-            logger.warn(`No destination channels for message ${messageData.messageId}`);
-            return { success: false, reason: 'No destination channels' };
-          }
+        // Skip processing if no destination channels
+        if (!messageData.destinationChannels || messageData.destinationChannels.length === 0) {
+          logger.warn(`No destination channels for message ${messageData.messageId}`);
+          return { success: false, reason: 'No destination channels' };
         }
-      } catch (consumerError) {
-        logger.error(`Error importing consumer: ${consumerError.message}`, { error: consumerError });
-        return null;
+        
+        // Classify message
+        const messageType = await aiService.classifyMessage(messageData.text);
+        logger.info(`Message ${messageData.messageId} classified as: ${messageType}`);
+        
+        // TESTING: Allow all messages to be forwarded, even noise
+        // Skip noise messages
+        // if (messageType === 'noise') {
+        //   logger.info(`Skipping noise message ${messageData.messageId}`);
+        //   return { success: true, status: 'skipped', reason: 'Noise message' };
+        // }
+        
+        if (messageType === 'noise') {
+          logger.info(`Message classified as noise but forwarding anyway (for testing)`);
+        }
+        
+        // Format the message based on its type
+        const formattedMessage = await aiService.formatMessage(messageData.text, messageType);
+        
+        // Forward to all destination channels
+        logger.info(`Forwarding message to ${messageData.destinationChannels.length} channels`);
+        const result = await telegramService.forwardMessage(formattedMessage, messageData.destinationChannels);
+        
+        logger.info(`Direct forwarding result: Success=${result.success}, Failure=${result.failure}`);
+        logger.info(`Successful channels: ${JSON.stringify(result.channels.successful)}`);
+        if (result.channels.failed.length > 0) {
+          logger.warn(`Failed channels: ${JSON.stringify(result.channels.failed)}`);
+        }
+        
+        return { 
+          success: result.success > 0, 
+          directForward: true,
+          messageType,
+          forwardResult: result 
+        };
+      } catch (error) {
+        logger.error(`Error processing message directly: ${error.message}`, { error });
+        return { success: false, error: error.message };
       }
     }
   } catch (error) {
     logger.error(`Error enqueueing/processing message: ${error.message}`, { error, messageData });
     // Don't throw so program can continue even if message processing fails
-    return null;
+    return { success: false, error: error.message };
   }
 }
 

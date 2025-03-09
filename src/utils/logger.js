@@ -27,6 +27,13 @@ const logger = winston.createLogger({
   ],
 });
 
+// Add warning alias for warn level
+logger.warning = logger.warn;
+
+// Add this to verify logger is working
+logger.info('Logger initialized with level: ' + logger.level);
+logger.warning('Warning alias configured');
+
 // Add file transports if in production
 if (process.env.NODE_ENV === 'production') {
   // Create log directory

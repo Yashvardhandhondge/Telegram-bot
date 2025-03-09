@@ -9,7 +9,7 @@ const config = {
   // Server configuration
   server: {
     port: process.env.PORT || 3000,
-    env: process.env.NODE_ENV || 'development',
+    env: process.env.NODE_ENV ,
   },
   
   // Telegram configuration
@@ -21,28 +21,28 @@ const config = {
   
   // AI Provider configuration
   ai: {
-    provider: process.env.AI_PROVIDER || 'gemini',
+    provider: process.env.AI_PROVIDER ,
     apiKey: process.env.AI_API_KEY,
-    model: process.env.AI_MODEL || (process.env.AI_PROVIDER === 'gemini' ? 'gemini-2.0-flash' : 'gpt-3.5-turbo'),
+    model: process.env.AI_MODEL ,
   },
   
   // Redis configuration
   redis: {
-    host: process.env.REDIS_HOST || 'localhost',
-    port: parseInt(process.env.REDIS_PORT) || 6379,
-    password: process.env.REDIS_PASSWORD || undefined,
+    host: process.env.REDIS_HOST ,
+    port: parseInt(process.env.REDIS_PORT) ,
+    password: process.env.REDIS_PASSWORD ,
   },
   
   // Queue configuration
   queue: {
-    name: process.env.MESSAGE_QUEUE_NAME || 'telegram_messages',
-    maxRetries: parseInt(process.env.MAX_QUEUE_RETRIES) || 3,
-    processTimeout: parseInt(process.env.MESSAGE_PROCESS_TIMEOUT) || 300,
+    name: process.env.MESSAGE_QUEUE_NAME ,
+    maxRetries: parseInt(process.env.MAX_QUEUE_RETRIES) ,
+    processTimeout: parseInt(process.env.MESSAGE_PROCESS_TIMEOUT) ,
   },
   
   // Logging configuration
   logging: {
-    level: process.env.LOG_LEVEL || 'info',
+    level: process.env.LOG_LEVEL ,
   },
   
   // Message types
