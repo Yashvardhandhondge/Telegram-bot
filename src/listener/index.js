@@ -1,4 +1,3 @@
-const { TelegramClient } = require('telegram');
 const { NewMessage } = require('telegram/events');
 const { initializeClient, sendPing } = require('../utils/telegramAuth');
 const config = require('../config');
@@ -241,8 +240,9 @@ async function handleMessage(message) {
       destinationChannels: formattedDestinations,
     };
     
+    
     // Process the message and don't wait for it to complete
-    logger.info(`⚙️ Enqueueing message ${message.id} for processing`);
+    logger.info(`⚙️ Enqueueing message ${message.id} for processing`, { messageData }, );
     enqueueMessage(messageData)
       .then(result => {
         logger.info(`✅ Enqueue result for message ${message.id}: ${JSON.stringify(result)}`);
