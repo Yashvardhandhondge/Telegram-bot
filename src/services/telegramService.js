@@ -1,45 +1,23 @@
-const { initializeClient } = require('../utils/telegramAuth');
-const config = require('../config');
+const axios = require('axios');
 const logger = require('../utils/logger');
 
-// Global Telegram client instance
-let telegramClient;
+// Get Telegram Bot token from environment
+const botToken = process.env.TELEGRAM_BOT_TOKEN;
 
-/**
- * Initialize the Telegram client for sending messages
- * @returns {Promise<Object>} Telegram client instance
- */
-async function initializeSender() {
-  try {
-    // Initialize Telegram client if not already initialized
-    if (!telegramClient) {
-      telegramClient = await initializeClient();
-      logger.info('Telegram sender initialized');
-      
-      // Ensure client is connected
-      if (!telegramClient.connected) {
-        logger.info('Connecting telegram sender client...');
-        await telegramClient.connect();
-        logger.info('Telegram sender client connected');
-      }
-    }
-    
-    return telegramClient;
-  } catch (error) {
-    logger.error(`Failed to initialize Telegram sender: ${error.message}`, { error });
-    throw error;
-  }
+// Log warning if bot token is missing
+if (!botToken) {
+  logger.warn('TELEGRAM_BOT_TOKEN not set in environment. Using fallback mechanism.');
 }
 
 /**
- * Parse a Telegram chat ID string
+ * Parse a Telegram chat ID string (handles thread IDs)
  * @param {string} chatId Chat ID string (may include thread ID)
  * @returns {Object} Object with parsed chat ID and thread ID
  */
 function parseChatId(chatId) {
   try {
     // Check if the chat ID includes a thread ID
-    if (chatId.includes('/')) {
+    if (chatId && chatId.includes('/')) {
       const [mainId, threadId] = chatId.split('/');
       return {
         chatId: mainId,
@@ -58,122 +36,54 @@ function parseChatId(chatId) {
 }
 
 /**
- * Ensure chat ID has the correct format for Telegram API
- * @param {string} chatId Raw chat ID
- * @returns {string} Formatted chat ID with correct prefix
- */
-function formatChatId(chatId) {
-  // Remove any existing minus sign
-  const cleanId = chatId.toString().replace(/^-/, '');
-  
-  // Add minus sign if it's a group/channel (IDs typically over 100)
-  // This is a heuristic that generally works for Telegram group/channel IDs
-  if (parseInt(cleanId) > 100) {
-    return `-${cleanId}`;
-  }
-  
-  return cleanId;
-}
-
-/**
- * Send a message to a Telegram chat
+ * Send a message to a Telegram chat using Bot API
  * @param {string} chatId Chat ID to send the message to
  * @param {string} text Message text to send
  * @returns {Promise<boolean>} True if message was sent successfully, false otherwise
  */
 async function sendMessage(chatId, text) {
   try {
-    // Make sure client is initialized and connected
-    const client = await initializeSender();
+    if (!botToken) {
+      logger.error('Cannot send message: TELEGRAM_BOT_TOKEN not set');
+      return false;
+    }
     
-    // Parse the chat ID
+    // Parse chat ID and thread ID
     const { chatId: parsedChatId, threadId } = parseChatId(chatId);
     
-    // Clean up the chat ID - remove minus sign for consistency
-    const cleanChatId = parsedChatId.startsWith('-') ? parsedChatId.substring(1) : parsedChatId;
+    // Clean the chat ID (remove any minus sign as Bot API doesn't need it)
+    const cleanChatId = parsedChatId.toString();
     
-    // Try different formats of the chat ID
-    const chatIdFormats = [
-      // As is (string)
-      parsedChatId,
-      // Raw ID with no prefix
-      cleanChatId,
-      // With minus prefix (most common for groups/channels)
-      `-${cleanChatId}`,
-      // As number
-      parseInt(cleanChatId),
-      // As negative number (for groups/channels)
-      -parseInt(cleanChatId)
-    ];
+    // Prepare request parameters
+    const params = {
+      chat_id: cleanChatId,
+      text: text,
+      parse_mode: 'HTML'
+    };
     
-    logger.debug(`Trying to send message to channel ${chatId} using multiple formats`);
-    
-    let success = false;
-    let lastError = null;
-    
-    // Try each format until one works
-    for (const idFormat of chatIdFormats) {
-      try {
-        logger.debug(`Trying to send to chat ID format: ${idFormat}`);
-        
-        // Create message parameters
-        const params = {
-          message: text
-        };
-        
-        // Add replyToMsgId if thread is specified
-        if (threadId) {
-          params.replyToMsgId = threadId;
-        }
-        
-        // Send the message
-        await client.sendMessage(idFormat, params);
-        
-        logger.info(`Sent message to chat ${chatId} using format ${idFormat}`);
-        success = true;
-        break;
-      } catch (error) {
-        lastError = error;
-        logger.debug(`Failed to send with format ${idFormat}: ${error.message}`);
-      }
+    // Add thread ID if present (message_thread_id in Bot API)
+    if (threadId) {
+      params.message_thread_id = threadId;
     }
     
-    if (!success && lastError) {
-      // Try one more approach - get entity first and then send
-      try {
-        logger.debug(`Trying alternative approach - resolving entity first for ${formatChatId(cleanChatId)}`);
-        
-        // Try to resolve the entity first (important in Docker environment)
-        const formattedId = formatChatId(cleanChatId);
-        const entity = await client.getEntity(formattedId);
-        
-        if (entity) {
-          logger.info(`Successfully resolved entity for ${formattedId}`);
-          
-          // Create message parameters
-          const params = {
-            message: text
-          };
-          
-          // Add replyToMsgId if thread is specified
-          if (threadId) {
-            params.replyToMsgId = threadId;
-          }
-          
-          // Send using the resolved entity
-          await client.sendMessage(entity, params);
-          logger.info(`Sent message to chat ${chatId} using resolved entity`);
-          return true;
-        }
-      } catch (entityError) {
-        logger.error(`Failed to resolve entity: ${entityError.message}`);
-        throw lastError; // Throw the original error
-      }
-    }
+    // Send request to Telegram Bot API
+    logger.debug(`Sending message to chat ${cleanChatId} via Bot API`);
+    const response = await axios.post(`https://api.telegram.org/bot${botToken}/sendMessage`, params);
     
-    return success;
+    if (response.data && response.data.ok) {
+      logger.info(`✅ Successfully sent message to chat ${cleanChatId} via Bot API`);
+      return true;
+    } else {
+      logger.error(`Failed to send message: ${JSON.stringify(response.data)}`);
+      return false;
+    }
   } catch (error) {
-    logger.error(`Error sending message to ${chatId}: ${error.message}`, { error });
+    // Handle Telegram API errors
+    if (error.response && error.response.data) {
+      logger.error(`Telegram API error: ${error.response.data.description}`);
+    } else {
+      logger.error(`Error sending message to ${chatId}: ${error.message}`);
+    }
     return false;
   }
 }
@@ -198,18 +108,17 @@ async function forwardMessage(text, destinationChannels) {
     logger.warn('No destination channels provided for forwarding');
     return result;
   }
+
+  const possibleDestinations = [...destinationChannels.map(channel => channel.toString().replace(/^-/, '')), ...destinationChannels.map(channel => !channel.startsWith('-') ? `-${channel}` : channel)]; 
   
-  logger.info(`🚀 Forwarding message to ${destinationChannels.length} channels: ${JSON.stringify(destinationChannels)}`);
+  logger.info(`🚀 Forwarding message to ${possibleDestinations.length} channels: ${JSON.stringify(possibleDestinations)}`);
   
   // Send message to each destination channel
-  for (const channelId of destinationChannels) {
+  for (const channelId of possibleDestinations) {
     try {
-      // In Docker environment, ensure we're using the right format
-      // const formattedChannelId = channelId.toString().startsWith('-') ? channelId : `-${channelId}`;
-      const formattedChannelId = channelId.toString().startsWith('-') ? channelId : `${channelId}`;
-      logger.info(`Attempting to forward to channel: ${formattedChannelId}`);
+      logger.info(`Attempting to forward to channel: ${channelId}`);
       
-      const success = await sendMessage(formattedChannelId, text);
+      const success = await sendMessage(channelId, text);
       
       if (success) {
         result.success++;
@@ -229,6 +138,11 @@ async function forwardMessage(text, destinationChannels) {
   
   logger.info(`📊 Forwarding results: ${result.success} successful, ${result.failure} failed`);
   return result;
+}
+
+// For backward compatibility - not actually used with Bot API
+function initializeSender() {
+  return Promise.resolve(null);
 }
 
 module.exports = {

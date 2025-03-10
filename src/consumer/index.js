@@ -30,7 +30,12 @@ async function processMessage(messageData) {
     
     // Get message text and destination channels
     const messageText = messageData.text;
-    let destinationChannels = messageData.destinationChannels;
+    let destinationChannels = messageData.destinationChannels || [];
+    
+    // Make sure destination channels don't have minus prefix as the Bot API doesn't need it
+    destinationChannels = destinationChannels.map(channel => channel.toString().replace(/^-/, ''));
+    
+    logger.info(`Processing for ${destinationChannels.length} destination channels: ${JSON.stringify(destinationChannels)}`);
     
     // Skip processing if no text or destinations
     if (!messageText || !destinationChannels || destinationChannels.length === 0) {
@@ -38,23 +43,23 @@ async function processMessage(messageData) {
       return { success: false, reason: 'Missing text or destinations' };
     }
     
-    // Ensure destination channels are strings and have the correct format
-    destinationChannels = destinationChannels.map(channel => {
-      const channelStr = channel.toString();
-      return channelStr.startsWith('-') ? channelStr : `-${channelStr}`;
-    });
-    
-    logger.info(`Formatted destination channels: ${JSON.stringify(destinationChannels)}`);
-    
     // Use AI to classify the message
-    const messageType = await aiService.classifyMessage(messageText);
-    logger.info(`Message ${messageData.messageId} classified as: ${messageType}`);
+    let messageType;
+    try {
+      messageType = await aiService.classifyMessage(messageText);
+      logger.info(`Message ${messageData.messageId} classified as: ${messageType}`);
+    } catch (classifyError) {
+      logger.error(`Error classifying message: ${classifyError.message}`);
+      // Use a fallback classification
+      messageType = 'alert'; // Default to alert for safety
+      logger.info(`Using fallback classification: ${messageType}`);
+    }
     
-    // TEMPORARY: Allow all messages to be forwarded for testing
-    // if (messageType === 'noise') {
-    //   logger.info(`Skipping noise message ${messageData.messageId}`);
-    //   return { success: true, status: 'skipped', reason: 'Noise message' };
-    // }
+    // Skip noise messages (optional - comment out if you want to forward everything)
+    if (messageType === 'noise') {
+      logger.info(`Skipping noise message ${messageData.messageId}`);
+      return { success: true, status: 'skipped', reason: 'Noise message' };
+    }
     
     // Format the message based on its type
     let formattedMessage;
@@ -63,10 +68,12 @@ async function processMessage(messageData) {
       logger.info(`Message formatted as ${messageType}`);
     } catch (formatError) {
       logger.error(`Error formatting message: ${formatError.message}`);
-      formattedMessage = `🔄 Forwarded (${messageType}): \n\n${messageText}`;
+      // Use a simple fallback format
+      formattedMessage = `📤 FORWARDED (${messageType}):\n\n${messageText}`;
+      logger.info(`Using fallback formatting`);
     }
     
-    // Forward to destination channels
+    // Forward to destination channels using the Bot API
     logger.info(`Forwarding message to ${destinationChannels.length} channels`);
     
     try {
@@ -126,9 +133,8 @@ if (process.env.RUN_CONSUMER === 'true') {
       logger.info(`Job ${job.id} completed with result: ${JSON.stringify(result)}`);
     });
   } else {
-    logger.error('Cannot start consumer: queue is not enabled');
-    // Instead of exiting, just warn and continue
-    logger.warn('Consumer will listen for direct processing requests');
+    logger.warn('Queue is not enabled. Consumer will run in direct processing mode.');
+    // No need to exit - the consumer can still process messages directly
   }
 }
 
