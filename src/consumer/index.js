@@ -29,55 +29,92 @@ async function processMessage(messageData) {
     logger.info(`Processing message ${messageData.messageId} from chat ${messageData.chatId}`);
     
     // Get message text and destination channels
-    const messageText = messageData.text;
+    const messageText = messageData.text || '';
     let destinationChannels = messageData.destinationChannels || [];
     
-    // Make sure destination channels don't have minus prefix as the Bot API doesn't need it
-    destinationChannels = destinationChannels.map(channel => channel.toString().replace(/^-/, ''));
+    // Filter out any invalid destination channels
+    destinationChannels = destinationChannels.filter(channel => 
+      channel && (typeof channel === 'string' || typeof channel === 'number')
+    );
     
     logger.info(`Processing for ${destinationChannels.length} destination channels: ${JSON.stringify(destinationChannels)}`);
     
-    // Skip processing if no text or destinations
-    if (!messageText || !destinationChannels || destinationChannels.length === 0) {
-      logger.warn(`Skipping message ${messageData.messageId}: Missing text or destinations`);
-      return { success: false, reason: 'Missing text or destinations' };
+    // Skip processing if no destinations
+    if (!destinationChannels || destinationChannels.length === 0) {
+      logger.warn(`Skipping message ${messageData.messageId}: Missing destinations`);
+      return { success: false, reason: 'Missing destinations' };
     }
     
-    // Use AI to classify the message
-    let messageType;
-    try {
-      messageType = await aiService.classifyMessage(messageText);
-      logger.info(`Message ${messageData.messageId} classified as: ${messageType}`);
-    } catch (classifyError) {
-      logger.error(`Error classifying message: ${classifyError.message}`);
-      // Use a fallback classification
-      messageType = 'alert'; // Default to alert for safety
-      logger.info(`Using fallback classification: ${messageType}`);
+    const hasMedia = messageData.hasMedia || false;
+    
+    // Handle media-only messages differently
+    if (hasMedia && (!messageText || messageText.trim() === '')) {
+      logger.info(`Message ${messageData.messageId} has media but no text, forwarding directly`);
+      
+      try {
+        // Forward with original media
+        const forwardResult = await telegramService.forwardMessage(messageData, destinationChannels);
+        return {
+          success: forwardResult.success > 0,
+          messageId: messageData.messageId,
+          mediaOnly: true,
+          mediaType: messageData.mediaType,
+          forwardResult
+        };
+      } catch (mediaError) {
+        logger.error(`Error forwarding media-only message: ${mediaError.message}`);
+        return { success: false, error: mediaError.message };
+      }
     }
     
-    // Skip noise messages (optional - comment out if you want to forward everything)
-    if (messageType === 'noise') {
-      logger.info(`Skipping noise message ${messageData.messageId}`);
-      return { success: true, status: 'skipped', reason: 'Noise message' };
+    // Skip if no text and no media
+    if (!messageText.trim() && !hasMedia) {
+      logger.warn(`Skipping message ${messageData.messageId}: No content to forward`);
+      return { success: false, reason: 'No content' };
     }
     
-    // Format the message based on its type
-    let formattedMessage;
-    try {
-      formattedMessage = await aiService.formatMessage(messageText, messageType);
-      logger.info(`Message formatted as ${messageType}`);
-    } catch (formatError) {
-      logger.error(`Error formatting message: ${formatError.message}`);
-      // Use a simple fallback format
-      formattedMessage = `📤 FORWARDED (${messageType}):\n\n${messageText}`;
-      logger.info(`Using fallback formatting`);
+    // Use AI to classify the message if there's text
+    let messageType = 'unclassified';
+    let formattedMessage = messageText;
+    
+    if (messageText && messageText.trim() !== '') {
+      try {
+        messageType = await aiService.classifyMessage(messageText);
+        logger.info(`Message ${messageData.messageId} classified as: ${messageType}`);
+        
+        // Skip noise messages if they don't have media
+        if (messageType === 'noise' && !hasMedia) {
+          logger.info(`Skipping noise message ${messageData.messageId}`);
+          return { success: true, status: 'skipped', reason: 'Noise message' };
+        }
+        
+        // Format the message based on its type
+        formattedMessage = await aiService.formatMessage(messageText, messageType);
+        logger.info(`Message formatted as ${messageType}`);
+      } catch (formatError) {
+        logger.error(`Error formatting message: ${formatError.message}`);
+        // Use a simple fallback format
+        formattedMessage = `📤 FORWARDED:\n\n${messageText}`;
+        logger.info(`Using fallback formatting`);
+      }
+    } else if (hasMedia) {
+      // For media with no text, use a simple caption
+      formattedMessage = `📤 Forwarded media`;
+      messageType = 'media';
+      logger.info(`Using simple caption for media-only message`);
     }
     
-    // Forward to destination channels using the Bot API
+    // Forward to destination channels
     logger.info(`Forwarding message to ${destinationChannels.length} channels`);
     
     try {
-      const forwardResult = await telegramService.forwardMessage(formattedMessage, destinationChannels);
+      // If the message has media, include it in the forwarding
+      const forwardData = hasMedia ? {
+        ...messageData,
+        text: formattedMessage
+      } : formattedMessage;
+      
+      const forwardResult = await telegramService.forwardMessage(forwardData, destinationChannels);
       logger.info(`Forwarding complete: ${forwardResult.success} successful, ${forwardResult.failure} failed`);
       
       if (forwardResult.channels.successful.length > 0) {
@@ -92,6 +129,8 @@ async function processMessage(messageData) {
         success: forwardResult.success > 0,
         messageId: messageData.messageId,
         messageType,
+        hasMedia,
+        mediaType: hasMedia ? messageData.mediaType : null,
         forwardResult
       };
     } catch (forwardError) {

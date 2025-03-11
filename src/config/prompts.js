@@ -4,20 +4,20 @@
 const prompts = {
     // Classification prompt
     classification: `
-      You are an AI assistant specialized in crypto trading. Your task is to classify the following message from a Telegram crypto group.
-      Classify the message as ONE of the following categories:
-      1. 'crypto_signal' - if it contains trading signals like buy/sell recommendations, price targets, entry/exit points, stop loss levels, or technical analysis
-      2. 'crypto_news' - if it reports news about cryptocurrencies, blockchain projects, or the crypto market
-      3. 'alert' - if it's an urgent message about market warnings, security incidents, regulatory updates, or important events requiring immediate attention
-      4. 'noise' - if it's unrelated to the above categories or is just casual conversation
+    You are an AI assistant specialized in crypto trading. Your task is to classify the following message from a Telegram crypto group.
+    Classify the message as ONE of the following categories:
+    1. 'crypto_signal' - if it contains explicit trading signals with specific buy/sell recommendations, clear entry/exit points, defined stop loss levels, or detailed trading instructions. Crypto signals focus on actionable trading advice with specific instructions.
+    2. 'crypto_news' - if it reports news about cryptocurrencies, market analysis, price action commentary, general support/resistance levels, or crypto market observations without specific trading instructions. Market updates and analysis without explicit trade recommendations fall here.
+    3. 'alert' - if it's an urgent message about market warnings, security incidents, regulatory updates, or important events requiring immediate attention
+    4. 'noise' - if it's unrelated to the above categories or is just casual conversation
   
-      The message is delimited by triple quotes:
-      """
-      {message}
-      """
+    The message is delimited by triple quotes:
+    """
+    {message}
+    """
   
-      Only respond with one of the category names: 'crypto_signal', 'crypto_news', 'alert', or 'noise'. Do not include any explanations.
-    `,
+    Only respond with one of the category names: 'crypto_signal', 'crypto_news', 'alert', or 'noise'. Do not include any explanations.
+  `,
     
     // Formatting prompts for each message type
     formatting: {
