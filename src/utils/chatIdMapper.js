@@ -28,7 +28,7 @@ function normalizeChannelId(chatId) {
     }
     
     // Remove any minus sign and leading zeros
-    const cleanMainId = mainId.replace(/^-/, '').replace(/^0+/, '');
+    const cleanMainId = mainId.replace(/^0+/, '');
     
     // Generate different possible formats
     const possibleFormats = [

@@ -1,5 +1,6 @@
-
+const { TelegramClient } = require('telegram');
 const { NewMessage } = require('telegram/events');
+const { Api } = require('telegram');
 const { initializeClient, sendPing } = require('../utils/telegramAuth');
 const config = require('../config');
 const logger = require('../utils/logger');
@@ -42,7 +43,10 @@ async function initializeListener() {
     logger.info('Telegram message listener started successfully');
   } catch (error) {
     logger.error(`Failed to initialize Telegram listener: ${error.message}`, { error });
-    process.exit(1);
+    
+    // Instead of exiting immediately, try to restart after a delay
+    logger.info('Will retry initialization in 30 seconds...');
+    setTimeout(initializeListener, 30000);
   }
 }
 
@@ -60,8 +64,65 @@ async function startMessageListener() {
     }
     logger.info(`Monitoring ${sourceChatIds.length} source channels/groups`);
 
-    // Add event handler for new messages - using correct import
+    // Add event handler for new messages
     telegramClient.addEventHandler(handleNewMessage, new NewMessage({}));
+    logger.info('Message handler added');
+
+    // Set up a periodic connection check and handler re-registration
+    setInterval(async () => {
+      try {
+        if (!telegramClient.connected) {
+          logger.warn('Periodic check: Client disconnected, attempting to reconnect...');
+          await telegramClient.connect();
+          logger.info('Reconnected successfully');
+          
+          // Re-add the message handler
+          telegramClient.addEventHandler(handleNewMessage, new NewMessage({}));
+          logger.info('Re-registered message handler after reconnection');
+        } else {
+          // Send a ping to verify the connection is healthy
+          const pingSuccess = await sendPing(telegramClient);
+          if (!pingSuccess) {
+            logger.warn('Ping failed, connection may be unhealthy, attempting to reconnect...');
+            try {
+              await telegramClient.disconnect();
+            } catch (e) {
+              // Ignore disconnection errors
+            }
+            
+            await telegramClient.connect();
+            
+            // Re-add the event handler
+            telegramClient.addEventHandler(handleNewMessage, new NewMessage({}));
+            logger.info('Re-registered message handler after reconnection');
+          }
+        }
+      } catch (error) {
+        logger.error(`Error in periodic connection check: ${error.message}`, { error });
+        
+        // Try to recover from serious errors
+        try {
+          logger.info('Attempting connection recovery...');
+          if (telegramClient) {
+            try {
+              await telegramClient.disconnect();
+            } catch (e) {
+              // Ignore
+            }
+          }
+          
+          // Re-initialize the client
+          telegramClient = await initializeClient();
+          await telegramClient.connect();
+          
+          // Re-add event handler
+          telegramClient.addEventHandler(handleNewMessage, new NewMessage({}));
+          logger.info('Connection recovery successful');
+        } catch (recoveryError) {
+          logger.error(`Connection recovery failed: ${recoveryError.message}`);
+        }
+      }
+    }, 60000); // Check every minute
 
     // Log connected chats for verification
     await logConnectedChats();
@@ -88,7 +149,7 @@ async function logConnectedChats() {
     const dialogs = await Promise.race([
       telegramClient.getDialogs({}),
       new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Timeout fetching dialogs')), 20000)
+        setTimeout(() => reject(new Error('Timeout fetching dialogs')), 30000)
       )
     ]);
     
@@ -111,7 +172,18 @@ async function logConnectedChats() {
   } catch (error) {
     logger.error(`Error fetching dialogs: ${error.message}`, { error });
     logger.warn('Continuing without dialog information');
-    // Don't throw error, let the listener start anyway
+    
+    // Try to reconnect since dialog fetching failed
+    try {
+      logger.info('Attempting to reconnect after dialog fetch failure...');
+      if (telegramClient.connected) {
+        await telegramClient.disconnect();
+      }
+      await telegramClient.connect();
+      logger.info('Reconnected successfully after dialog fetch failure');
+    } catch (reconnectError) {
+      logger.error(`Failed to reconnect after dialog failure: ${reconnectError.message}`);
+    }
   }
 }
 
@@ -124,14 +196,14 @@ async function handleNewMessage(event) {
     const message = event.message;
 
     // Skip messages without text or media
-    if (!message.text && !message.media) {
+    if (!message || (!message.text && !message.media)) {
       logger.debug("Skipping message with no text and no media");
       return;
     }
 
     // Debug log raw message with sanitization to prevent huge logs
     const messageCopy = JSON.parse(JSON.stringify(message));
-    logger.debug(`Message received: ${JSON.stringify(messageCopy)}`);
+    
     // Remove very large or sensitive properties
     if (messageCopy.media && messageCopy.media.photo && messageCopy.media.photo.sizes) {
       messageCopy.media.photo.sizes = `[${messageCopy.media.photo.sizes.length} sizes available]`;
@@ -266,7 +338,7 @@ async function handleNewMessage(event) {
     } else {
       // Log some useful information for debugging mapping issues
       logger.debug(`Message from unmapped chat ${chatId} (not in our mapping)`);
-      if (config.logging.level === 'debug') {
+      if (config.logging && config.logging.level === 'debug') {
         logger.debug(`Available mappings: ${JSON.stringify(Object.keys(channelMapping['@user1']))}`);
       }
     }
@@ -329,7 +401,10 @@ function getDestinationChannels(sourceChatId) {
     await initializeListener();
   } catch (error) {
     logger.error(`Failed to start listener: ${error.message}`, { error });
-    process.exit(1);
+    
+    // Instead of exiting, retry after a delay
+    logger.info('Retrying listener initialization in 30 seconds...');
+    setTimeout(initializeListener, 30000);
   }
 })();
 
@@ -349,6 +424,18 @@ process.on('SIGINT', async () => {
     await telegramClient.disconnect();
   }
   process.exit(0);
+});
+
+// Handle uncaught exceptions for better stability
+process.on('uncaughtException', (error) => {
+  logger.error(`Uncaught exception: ${error.message}`, { error });
+  logger.info('Continuing despite uncaught exception');
+});
+
+// Handle unhandled promise rejections for better stability
+process.on('unhandledRejection', (reason, promise) => {
+  logger.error(`Unhandled rejection at ${promise}, reason: ${reason}`);
+  logger.info('Continuing despite unhandled rejection');
 });
 
 module.exports = {

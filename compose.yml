@@ -12,44 +12,44 @@ services:
       timeout: 5s
       retries: 5
 
-  # app:
-  #   build:
-  #     context: .
-  #     dockerfile: Dockerfile
-  #   depends_on:
-  #     redis:
-  #       condition: service_healthy
-  #   env_file:
-  #     - .env
-  #   environment:
-  #     - DOCKER_ENV=true
-  #     - REDIS_HOST=redis
-  #   ports:
-  #     - "3000:3000"
-  #   volumes:
-  #     - ./:/app
-  #     - /app/node_modules
-  #   command: ["npm", "run", "run:listener"]
-  #   restart: unless-stopped
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - DOCKER_ENV=true
+      - REDIS_HOST=redis
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./:/app
+      - /app/node_modules
+    command: ["npm", "run", "run:listener"]
+    restart: unless-stopped
 
-  # consumer:
-  #   build:
-  #     context: .
-  #     dockerfile: Dockerfile
-  #   depends_on:
-  #     redis:
-  #       condition: service_healthy
-  #   env_file:
-  #     - .env
-  #   environment:
-  #     - DOCKER_ENV=true
-  #     - REDIS_HOST=redis
-  #     - RUN_CONSUMER=true
-  #   volumes:
-  #     - ./:/app
-  #     - /app/node_modules
-  #   command: ["node", "src/consumer"]
-  #   restart: unless-stopped
+  consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - DOCKER_ENV=true
+      - REDIS_HOST=redis
+      - RUN_CONSUMER=true
+    volumes:
+      - ./:/app
+      - /app/node_modules
+    command: ["node", "src/consumer"]
+    restart: unless-stopped
 
 volumes:
   redis-data:
