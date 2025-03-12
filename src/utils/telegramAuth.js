@@ -63,7 +63,7 @@ async function sendPing(client) {
     }
     
     // Use the correct API for pinging
-    const result = await client.invoke(new Api.Ping({
+    await client.invoke(new Api.Ping({
       pingId: BigInt(Math.floor(Math.random() * 1000000000))
     }));
     
@@ -132,7 +132,7 @@ async function initializeClient() {
         // Try to disconnect and reconnect from scratch
         try {
           await client.disconnect();
-        } catch (e) {
+        } catch {
           // Ignore disconnection errors
         }
         
