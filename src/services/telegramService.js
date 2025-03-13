@@ -1,44 +1,107 @@
-const axios = require('axios');
-const fs = require('fs');
-const path = require('path');
-const { initializeClient } = require('../utils/telegramAuth');
+const { TelegramClient } = require('telegram');
+const { StringSession } = require('telegram/sessions');
 const { Api } = require('telegram');
+const config = require('../config');
 const logger = require('../utils/logger');
-const FormData = require('form-data');
+const axios = require('axios');
+
+// Global Telegram client instance
+let telegramClient;
 
 // Get Telegram Bot token from environment
 const botToken = process.env.TELEGRAM_BOT_TOKEN;
 
-// Global Telegram client instance for downloading media
-let telegramClient = null;
-
-// Create temporary directory for media downloads if it doesn't exist
-const tempDir = path.join(__dirname, '..', '..', 'temp');
-if (!fs.existsSync(tempDir)) {
-  fs.mkdirSync(tempDir, { recursive: true });
-}
-
 /**
- * Initialize the Telegram client for downloading media
+ * Initialize the Telegram client for sending messages
  * @returns {Promise<Object>} Telegram client instance
  */
 async function initializeSender() {
   try {
-    // Initialize Telegram client if not already initialized or not connected
-    if (!telegramClient || !telegramClient.connected) {
+    // Initialize Telegram client if not already initialized
+    if (!telegramClient) {
       telegramClient = await initializeClient();
-      logger.info('Telegram client initialized for media downloads');
+      logger.info('Telegram sender initialized');
       
       // Ensure client is connected
       if (!telegramClient.connected) {
-        logger.info('Connecting telegram client...');
+        logger.info('Connecting telegram sender client...');
         await telegramClient.connect();
-        logger.info('Telegram client connected');
+        logger.info('Telegram sender client connected');
       }
     }
     
-    // Always return the global client - never disconnect it
     return telegramClient;
+  } catch (error) {
+    logger.error(`Failed to initialize Telegram sender: ${error.message}`, { error });
+    throw error;
+  }
+}
+
+/**
+ * Initialize Telegram client with existing session or new authentication
+ * @returns {Promise<TelegramClient>} Authenticated Telegram client
+ */
+async function initializeClient() {
+  try {
+    const stringSession = new StringSession(config.telegram.sessionString || '');
+    
+    const client = new TelegramClient(
+      stringSession,
+      config.telegram.apiId,
+      config.telegram.apiHash,
+      {
+        connectionRetries: 10,
+        shouldReconnect: true,
+        useWSS: false,
+        timeout: 30000, // Increase timeout to 30 seconds
+        retryDelay: 1000 // Delay between connection retries
+      }
+    );
+    
+    // If we have a session string, try to connect directly
+    if (config.telegram.sessionString) {
+      try {
+        logger.info('Connecting to Telegram with existing session...');
+        await client.connect();
+        
+        // Verify connection by getting self info
+        const me = await client.getMe();
+        logger.info(`Connected as: ${me.firstName} ${me.lastName || ''} (@${me.username || 'no username'})`);
+        
+        // Check if we're still authenticated
+        if (await client.checkAuthorization()) {
+          logger.info('Successfully connected to Telegram using existing session');
+        } else {
+          // If not authorized, handle session expiration
+          logger.error('Session expired, cannot continue without valid session');
+          throw new Error('Session expired');
+        }
+      } catch (error) {
+        logger.error(`Error connecting with existing session: ${error.message}`, { error });
+        throw error;
+      }
+    } else {
+      // No session string provided
+      logger.error('No session string provided, cannot initialize client');
+      throw new Error('No session string provided');
+    }
+    
+    // Add connection maintenance handler
+    setInterval(async () => {
+      try {
+        if (client.connected) {
+          await sendPing(client);
+        } else {
+          logger.warn('Client disconnected, attempting to reconnect...');
+          await client.connect();
+          logger.info('Reconnected successfully');
+        }
+      } catch (error) {
+        logger.error(`Error in keep-alive ping: ${error.message}`, { error });
+      }
+    }, 60000); // Every minute
+    
+    return client;
   } catch (error) {
     logger.error(`Failed to initialize Telegram client: ${error.message}`, { error });
     throw error;
@@ -46,17 +109,61 @@ async function initializeSender() {
 }
 
 /**
- * Parse a Telegram chat ID string (handles thread IDs)
+ * Send a ping to verify the connection
+ * @param {TelegramClient} client Telegram client
+ * @returns {Promise<boolean>} True if ping successful
+ */
+async function sendPing(client) {
+  try {
+    if (!client.connected) {
+      return false;
+    }
+    
+    // Use the correct API for pinging
+    const result = await client.invoke(new Api.Ping({
+      pingId: BigInt(Math.floor(Math.random() * 1000000000))
+    }));
+    
+    logger.debug('Ping successful');
+    return true;
+  } catch (error) {
+    logger.error(`Ping failed: ${error.message}`);
+    return false;
+  }
+}
+
+/**
+ * Check if a client is fully connected and working
+ * @param {TelegramClient} client Telegram client to check
+ * @returns {Promise<boolean>} True if client is connected and working
+ */
+async function isClientHealthy(client) {
+  if (!client || !client.connected) {
+    return false;
+  }
+  
+  try {
+    // Try a simple API call to verify the client is working
+    await client.invoke(new Api.Ping({
+      pingId: BigInt(Math.floor(Math.random() * 1000000000))
+    }));
+    return true;
+  } catch (error) {
+    logger.error(`Client health check failed: ${error.message}`);
+    return false;
+  }
+}
+
+/**
+ * Parse a Telegram chat ID string
  * @param {string} chatId Chat ID string (may include thread ID)
  * @returns {Object} Object with parsed chat ID and thread ID
  */
 function parseChatId(chatId) {
   try {
-    if (!chatId) return { chatId: null, threadId: null };
-    
     // Check if the chat ID includes a thread ID
-    if (chatId.toString().includes('/')) {
-      const [mainId, threadId] = chatId.toString().split('/');
+    if (chatId.includes('/')) {
+      const [mainId, threadId] = chatId.split('/');
       return {
         chatId: mainId,
         threadId: parseInt(threadId)
@@ -64,17 +171,17 @@ function parseChatId(chatId) {
     }
     
     return {
-      chatId: chatId.toString(),
+      chatId,
       threadId: null
     };
   } catch (error) {
     logger.error(`Error parsing chat ID ${chatId}: ${error.message}`, { error });
-    return { chatId: chatId?.toString(), threadId: null };
+    return { chatId, threadId: null };
   }
 }
 
 /**
- * Send a text message to a Telegram chat using Bot API
+ * Send a message to a Telegram chat using Bot API
  * @param {string} chatId Chat ID to send the message to
  * @param {string} text Message text to send
  * @returns {Promise<boolean>} True if message was sent successfully, false otherwise
@@ -130,498 +237,6 @@ async function sendMessage(chatId, text) {
     }
     return false;
   }
-}
-
-/**
- * Convert a chat ID to a peer for MTProto API
- * @param {string|number} chatId The chat ID to convert
- * @returns {Object} A peer object for the MTProto API
- */
-function createPeer(chatId) {
-  if (typeof chatId !== 'string' && typeof chatId !== 'number') {
-    return null;
-  }
-  
-  const idStr = chatId.toString();
-  
-  // Channel or supergroup
-  if (idStr.startsWith('-100')) {
-    return {
-      channelId: BigInt(idStr.substring(4)),
-      className: 'PeerChannel'
-    };
-  }
-  // Group chat
-  else if (idStr.startsWith('-')) {
-    return {
-      chatId: BigInt(idStr.substring(1)),
-      className: 'PeerChat'
-    };
-  }
-  // User
-  else {
-    return {
-      userId: BigInt(idStr),
-      className: 'PeerUser'
-    };
-  }
-}
-
-/**
- * Download media from a message
- * @param {Object} messageData Message data with media info
- * @returns {Promise<string|null>} Path to downloaded file or null if failed
- */
-async function downloadMedia(messageData) {
-  try {
-    if (!messageData || !messageData.hasMedia || !messageData.mediaType) {
-      logger.error('No media to download');
-      return null;
-    }
-    
-    const client = await initializeSender();
-    
-    // Check which type of media we're dealing with
-    const mediaType = messageData.mediaType;
-    const sourceInfo = messageData.sourceInfo || {};
-    const chatId = sourceInfo.chatId || messageData.chatId;
-    const messageId = sourceInfo.messageId || messageData.messageId;
-    
-    if (!chatId || !messageId) {
-      logger.error('Missing chat ID or message ID for media download');
-      return null;
-    }
-    
-    // Create peer for the chat
-    const peer = createPeer(chatId);
-    if (!peer) {
-      logger.error(`Couldn't create peer for chat ID: ${chatId}`);
-      return null;
-    }
-    
-    // Get the full message to extract media
-    const messages = await client.invoke(new Api.messages.GetMessages({
-      id: [parseInt(messageId)],
-      peer: peer
-    }));
-    
-    if (!messages || !messages.messages || messages.messages.length === 0) {
-      logger.error('Could not find message for media download');
-      return null;
-    }
-    
-    const message = messages.messages[0];
-    if (!message || !message.media) {
-      logger.error('Message has no media');
-      return null;
-    }
-    
-    // Generate a unique filename
-    const timestamp = new Date().getTime();
-    let filePath;
-    
-    // Handle photos
-    if (mediaType === 'MessageMediaPhoto' && message.media.photo) {
-      filePath = path.join(tempDir, `photo_${timestamp}.jpg`);
-      
-      // Download the photo
-      const buffer = await client.downloadMedia(message.media, {
-        outputFile: filePath
-      });
-      
-      if (!buffer || buffer.length === 0) {
-        logger.error('Downloaded photo is empty');
-        return null;
-      }
-      
-      logger.info(`Successfully downloaded photo to ${filePath}`);
-      return filePath;
-    }
-    // Handle documents (including videos, files, etc.)
-    else if (mediaType === 'MessageMediaDocument' && message.media.document) {
-      const document = message.media.document;
-      const mimeType = document.mimeType || 'application/octet-stream';
-      
-      // Determine file extension
-      let extension = '.bin';
-      if (mimeType.startsWith('image/')) {
-        extension = mimeType.replace('image/', '.');
-      } else if (mimeType.startsWith('video/')) {
-        extension = mimeType.replace('video/', '.');
-      } else if (mimeType.startsWith('audio/')) {
-        extension = mimeType.replace('audio/', '.');
-      } else if (mimeType === 'application/pdf') {
-        extension = '.pdf';
-      }
-      
-      filePath = path.join(tempDir, `document_${timestamp}${extension}`);
-      
-      // Download the document
-      const buffer = await client.downloadMedia(message.media, {
-        outputFile: filePath
-      });
-      
-      if (!buffer || buffer.length === 0) {
-        logger.error('Downloaded document is empty');
-        return null;
-      }
-      
-      logger.info(`Successfully downloaded document to ${filePath}`);
-      return filePath;
-    }
-    // Try direct download if message has media but not in a format we can handle explicitly
-    else if (message.media) {
-      filePath = path.join(tempDir, `media_${timestamp}.bin`);
-      
-      try {
-        // Try direct download
-        const buffer = await client.downloadMedia(message.media, {
-          outputFile: filePath
-        });
-        
-        if (!buffer || buffer.length === 0) {
-          logger.error('Downloaded media is empty');
-          return null;
-        }
-        
-        logger.info(`Successfully downloaded media to ${filePath}`);
-        return filePath;
-      } catch (directDownloadError) {
-        logger.error(`Direct media download failed: ${directDownloadError.message}`);
-        return null;
-      }
-    }
-    
-    logger.error(`Unsupported media type: ${mediaType}`);
-    return null;
-  } catch (error) {
-    logger.error(`Error downloading media: ${error.message}`, { error });
-    return null;
-  }
-}
-
-/**
- * Send a photo to a chat using Bot API
- * @param {string} chatId Chat ID to send to
- * @param {string} photoPath Path to the photo file
- * @param {string} caption Optional caption for the photo
- * @returns {Promise<boolean>} True if successful
- */
-async function sendPhoto(chatId, photoPath, caption = '') {
-  try {
-    if (!botToken) {
-      logger.error('Bot token not set');
-      return false;
-    }
-    
-    if (!fs.existsSync(photoPath)) {
-      logger.error(`Photo file not found: ${photoPath}`);
-      return false;
-    }
-    
-    // Parse chat ID and thread ID
-    const { chatId: parsedChatId, threadId } = parseChatId(chatId);
-    
-    // Create form data with the file
-    const form = new FormData();
-    form.append('chat_id', parsedChatId);
-    form.append('photo', fs.createReadStream(photoPath));
-    
-    if (caption && caption.trim() !== '') {
-      form.append('caption', caption);
-      form.append('parse_mode', 'HTML');
-    }
-    
-    if (threadId) {
-      form.append('message_thread_id', threadId);
-    }
-    
-    // Send the request
-    const response = await axios.post(`https://api.telegram.org/bot${botToken}/sendPhoto`, form, {
-      headers: form.getHeaders()
-    });
-    
-    if (response.data && response.data.ok) {
-      logger.info(`✅ Successfully sent photo to chat ${parsedChatId}`);
-      return true;
-    } else {
-      logger.error(`Failed to send photo: ${JSON.stringify(response.data)}`);
-      return false;
-    }
-  } catch (error) {
-    if (error.response && error.response.data) {
-      logger.error(`Telegram API error: ${JSON.stringify(error.response.data)}`);
-    } else {
-      logger.error(`Error sending photo: ${error.message}`);
-    }
-    return false;
-  }
-}
-
-/**
- * Send a document to a chat using Bot API
- * @param {string} chatId Chat ID to send to
- * @param {string} docPath Path to the document file
- * @param {string} caption Optional caption for the document
- * @returns {Promise<boolean>} True if successful
- */
-async function sendDocument(chatId, docPath, caption = '') {
-  try {
-    if (!botToken) {
-      logger.error('Bot token not set');
-      return false;
-    }
-    
-    if (!fs.existsSync(docPath)) {
-      logger.error(`Document file not found: ${docPath}`);
-      return false;
-    }
-    
-    // Parse chat ID and thread ID
-    const { chatId: parsedChatId, threadId } = parseChatId(chatId);
-    
-    // Create form data with the file
-    const form = new FormData();
-    form.append('chat_id', parsedChatId);
-    form.append('document', fs.createReadStream(docPath));
-    
-    if (caption && caption.trim() !== '') {
-      form.append('caption', caption);
-      form.append('parse_mode', 'HTML');
-    }
-    
-    if (threadId) {
-      form.append('message_thread_id', threadId);
-    }
-    
-    // Send the request
-    const response = await axios.post(`https://api.telegram.org/bot${botToken}/sendDocument`, form, {
-      headers: form.getHeaders()
-    });
-    
-    if (response.data && response.data.ok) {
-      logger.info(`✅ Successfully sent document to chat ${parsedChatId}`);
-      return true;
-    } else {
-      logger.error(`Failed to send document: ${JSON.stringify(response.data)}`);
-      return false;
-    }
-  } catch (error) {
-    if (error.response && error.response.data) {
-      logger.error(`Telegram API error: ${JSON.stringify(error.response.data)}`);
-    } else {
-      logger.error(`Error sending document: ${error.message}`);
-    }
-    return false;
-  }
-}
-
-/**
- * Send a video to a chat using Bot API
- * @param {string} chatId Chat ID to send to
- * @param {string} videoPath Path to the video file
- * @param {string} caption Optional caption for the video
- * @returns {Promise<boolean>} True if successful
- */
-async function sendVideo(chatId, videoPath, caption = '') {
-  try {
-    if (!botToken) {
-      logger.error('Bot token not set');
-      return false;
-    }
-    
-    if (!fs.existsSync(videoPath)) {
-      logger.error(`Video file not found: ${videoPath}`);
-      return false;
-    }
-    
-    // Parse chat ID and thread ID
-    const { chatId: parsedChatId, threadId } = parseChatId(chatId);
-    
-    // Create form data with the file
-    const form = new FormData();
-    form.append('chat_id', parsedChatId);
-    form.append('video', fs.createReadStream(videoPath));
-    
-    if (caption && caption.trim() !== '') {
-      form.append('caption', caption);
-      form.append('parse_mode', 'HTML');
-    }
-    
-    if (threadId) {
-      form.append('message_thread_id', threadId);
-    }
-    
-    // Send the request
-    const response = await axios.post(`https://api.telegram.org/bot${botToken}/sendVideo`, form, {
-      headers: form.getHeaders()
-    });
-    
-    if (response.data && response.data.ok) {
-      logger.info(`✅ Successfully sent video to chat ${parsedChatId}`);
-      return true;
-    } else {
-      logger.error(`Failed to send video: ${JSON.stringify(response.data)}`);
-      return false;
-    }
-  } catch (error) {
-    if (error.response && error.response.data) {
-      logger.error(`Telegram API error: ${JSON.stringify(error.response.data)}`);
-    } else {
-      logger.error(`Error sending video: ${error.message}`);
-    }
-    return false;
-  }
-}
-
-/**
- * Send a media message with the appropriate method based on file type
- * @param {string} chatId Chat ID to send to
- * @param {string} mediaPath Path to the media file
- * @param {string} mediaType Type of media
- * @param {string} caption Optional caption for the media
- * @returns {Promise<boolean>} True if successful
- */
-async function sendMedia(chatId, mediaPath, mediaType, caption = '') {
-  try {
-    // Detect media type by extension if not explicitly provided
-    if (!mediaType && mediaPath) {
-      const ext = path.extname(mediaPath).toLowerCase();
-      if (['.jpg', '.jpeg', '.png', '.gif'].includes(ext)) {
-        mediaType = 'photo';
-      } else if (['.mp4', '.avi', '.mov', '.mkv'].includes(ext)) {
-        mediaType = 'video';
-      } else {
-        mediaType = 'document';
-      }
-    }
-    
-    // Call the appropriate method based on media type
-    if (mediaType === 'photo' || mediaType === 'MessageMediaPhoto') {
-      return await sendPhoto(chatId, mediaPath, caption);
-    } else if (mediaType === 'video' || mediaType.includes('video')) {
-      return await sendVideo(chatId, mediaPath, caption);
-    } else {
-      return await sendDocument(chatId, mediaPath, caption);
-    }
-  } catch (error) {
-    logger.error(`Error sending media: ${error.message}`, { error });
-    return false;
-  }
-}
-
-/**
- * Forward a processed message to all destination channels
- * @param {Object} messageData Message data including source chat ID, message ID and destination channels
- * @returns {Promise<Object>} Object with success and failure counts
- */
-async function forwardProcessedMessage(messageData) {
-  const result = {
-    success: 0,
-    failure: 0,
-    channels: {
-      successful: [],
-      failed: []
-    }
-  };
-  
-  if (!messageData.destinationChannels || messageData.destinationChannels.length === 0) {
-    logger.warn('No destination channels provided for forwarding');
-    return result;
-  }
-  
-  // Get the message text - use formatted text if available
-  const text = messageData.formattedText || messageData.text || '';
-  
-  // Download media if present
-  let mediaPath = null;
-  let mediaType = null;
-  
-  if (messageData.hasMedia) {
-    try {
-      logger.info('Downloading media for bot forwarding...');
-      mediaPath = await downloadMedia(messageData);
-      mediaType = messageData.mediaType;
-      
-      if (mediaPath) {
-        logger.info(`Media downloaded to: ${mediaPath} (type: ${mediaType})`);
-      } else {
-        logger.warn('Failed to download media, will send text-only message');
-      }
-    } catch (downloadError) {
-      logger.error(`Error downloading media: ${downloadError.message}`, { error: downloadError });
-    }
-  }
-  
-  // Send to each destination channel
-  for (const channelId of messageData.destinationChannels) {
-    try {
-      logger.info(`Forwarding to channel ${channelId}`);
-      
-      let success = false;
-      
-      // Try to send with media if available
-      if (mediaPath) {
-        try {
-          success = await sendMedia(channelId, mediaPath, mediaType, text);
-          
-          if (success) {
-            logger.info(`✅ Successfully sent media message to ${channelId}`);
-          } else {
-            // If media sending fails, try text-only
-            logger.warn(`Failed to send media, falling back to text-only for ${channelId}`);
-            if (text && text.trim() !== '') {
-              const fallbackText = `${text}\n\n[Media attachment could not be sent]`;
-              success = await sendMessage(channelId, fallbackText);
-            }
-          }
-        } catch (mediaError) {
-          logger.error(`Error sending media to ${channelId}: ${mediaError.message}`, { error: mediaError });
-          
-          // Try text fallback
-          if (text && text.trim() !== '') {
-            success = await sendMessage(channelId, `${text}\n\n[Media sending failed]`);
-          }
-        }
-      } else {
-        // Text-only message
-        if (text && text.trim() !== '') {
-          success = await sendMessage(channelId, text);
-          if (success) {
-            logger.info(`✅ Successfully sent text message to ${channelId}`);
-          }
-        } else {
-          logger.warn(`Empty message for channel ${channelId}, skipping`);
-        }
-      }
-      
-      // Update result tracking
-      if (success) {
-        result.success++;
-        result.channels.successful.push(channelId);
-      } else {
-        result.failure++;
-        result.channels.failed.push(channelId);
-      }
-    } catch (error) {
-      logger.error(`Error forwarding to channel ${channelId}: ${error.message}`, { error });
-      result.failure++;
-      result.channels.failed.push(channelId);
-    }
-  }
-  
-  // Clean up downloaded media file
-  if (mediaPath && fs.existsSync(mediaPath)) {
-    try {
-      fs.unlinkSync(mediaPath);
-      logger.debug(`Cleaned up temporary media file: ${mediaPath}`);
-    } catch (cleanupError) {
-      logger.error(`Error cleaning up media file: ${cleanupError.message}`);
-    }
-  }
-  
-  logger.info(`Forwarding results: ${result.success} successful, ${result.failure} failed`);
-  return result;
 }
 
 /**
@@ -694,11 +309,118 @@ async function forwardMessage(messageData, destinationChannels) {
   return result;
 }
 
+/**
+ * Reinitialize the Telegram client after disconnection
+ * @returns {Promise<TelegramClient>} Reinitialized client
+ */
+async function reinitializeClient() {
+  try {
+    // Clean up existing client if any
+    if (telegramClient) {
+      try {
+        logger.info('Disconnecting existing client');
+        await telegramClient.disconnect();
+      } catch (e) {
+        // Ignore disconnection errors
+        logger.warn(`Error during client disconnection: ${e.message}`);
+      }
+      telegramClient = null;
+    }
+    
+    // Create a fresh client
+    const stringSession = new StringSession(config.telegram.sessionString || '');
+    
+    const newClient = new TelegramClient(
+      stringSession,
+      config.telegram.apiId,
+      config.telegram.apiHash,
+      {
+        connectionRetries: 5,
+        useWSS: false,
+        shouldReconnect: true,
+        timeout: 60000 // 60 second timeout
+      }
+    );
+    
+    // Connect the client
+    await newClient.connect();
+    
+    // Verify connection
+    const me = await newClient.getMe();
+    logger.info(`Reinitialized client connected as: ${me.firstName} ${me.lastName || ''} (@${me.username || 'no username'})`);
+    
+    // Update global client reference
+    telegramClient = newClient;
+    
+    logger.info('Telegram client reinitialized successfully');
+    return telegramClient;
+  } catch (error) {
+    logger.error(`Failed to reinitialize client: ${error.message}`);
+    throw error;
+  }
+}
+
+/**
+ * Test function to manually trigger a disconnection
+ * @returns {Promise<boolean>} True if client was disconnected
+ */
+async function testDisconnection() {
+  logger.info('Manually triggering disconnection for testing...');
+  if (telegramClient && telegramClient.connected) {
+    await telegramClient.disconnect();
+    logger.info('Client manually disconnected for testing');
+    return true;
+  }
+  return false;
+}
+
+// Keep the media handling code but don't use it
+// This will be maintained for future reference
+
+/**
+ * Download media from a message
+ * This function is kept for future reference but is not used in the current implementation
+ */
+async function downloadMedia(messageData) {
+  logger.info('Media download functionality is disabled');
+  return null;
+}
+
+/**
+ * Send a media message with the appropriate method based on file type
+ * This function is kept for future reference but is not used in the current implementation
+ */
+async function sendMedia(chatId, mediaPath, mediaType, caption = '') {
+  logger.info('Media sending functionality is disabled');
+  return false;
+}
+
+/**
+ * Forward a processed message with media to all destination channels
+ * This function is kept for future reference but is not used in the current implementation
+ */
+async function forwardProcessedMessage(messageData) {
+  logger.info('Media forwarding functionality is disabled, using text-only forwarding');
+  
+  // Create a text-only message with a note about media
+  const text = messageData.formattedText || messageData.text || '';
+  const textWithNote = messageData.hasMedia 
+    ? `${text}\n\n[Media attachment not forwarded - media handling disabled]` 
+    : text;
+  
+  // Use the regular text forwarding
+  return await forwardMessage(textWithNote, messageData.destinationChannels);
+}
+
 module.exports = {
   sendMessage,
   sendMedia,
   forwardMessage,
   forwardProcessedMessage,
   downloadMedia,
-  initializeSender
+  initializeSender,
+  reinitializeClient,
+  isClientHealthy,
+  sendPing,
+  testDisconnection
 };

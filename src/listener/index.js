@@ -44,7 +44,7 @@ async function initializeListener() {
   } catch (error) {
     logger.error(`Failed to initialize Telegram listener: ${error.message}`, { error });
     
-    // Instead of exiting immediately, try to restart after a delay
+    // Instead of exiting, try to restart after a delay
     logger.info('Will retry initialization in 30 seconds...');
     setTimeout(initializeListener, 30000);
   }
@@ -195,28 +195,18 @@ async function handleNewMessage(event) {
   try {
     const message = event.message;
 
-    // Skip messages without text or media
-    if (!message || (!message.text && !message.media)) {
-      logger.debug("Skipping message with no text and no media");
+    // Skip messages without text
+    if (!message.text) {
+      // Note: We're ignoring media messages for now
+      if (message.media) {
+        logger.debug("Ignoring message with media but no text (media handling disabled)");
+      }
       return;
     }
 
-    // Debug log raw message with sanitization to prevent huge logs
-    const messageCopy = JSON.parse(JSON.stringify(message));
-    
-    // Remove very large or sensitive properties
-    if (messageCopy.media && messageCopy.media.photo && messageCopy.media.photo.sizes) {
-      messageCopy.media.photo.sizes = `[${messageCopy.media.photo.sizes.length} sizes available]`;
-    }
-    if (messageCopy.media && messageCopy.media.photo && messageCopy.media.photo.fileReference) {
-      messageCopy.media.photo.fileReference = '[file reference available]';
-    }
-    logger.debug(`Message received: ${JSON.stringify(messageCopy, null, 2).substring(0, 1000)}...`);
-    
-    // Log media type if present
-    if (message.media) {
-      logger.info(`Message has media of type: ${message.media.className}`);
-    }
+    // Debug log raw message structure (just first level keys to avoid huge logs)
+    const messageKeys = Object.keys(message);
+    logger.debug(`Message received with keys: ${messageKeys.join(', ')}`);
 
     // Get chat ID - corrected for the actual message format
     let chatId;
@@ -249,97 +239,64 @@ async function handleNewMessage(event) {
     }
 
     if (!chatId) {
-      logger.warn(`Could not determine chat ID for message: ${message.text ? message.text.substring(0, 100) : '[No text]'}`);
+      logger.warn(`Could not determine chat ID for message: ${message.text.substring(0, 100)}`);
       return;
     }
 
+    // Log normalized formats for debugging
+    const { normalizeChannelId } = require('../utils/chatIdMapper');
+    const normalizedFormats = normalizeChannelId(chatId);
+    logger.debug(`Normalized formats for chat ID ${chatId}: ${JSON.stringify(normalizedFormats)}`);
+
+    // Check mapping using findMatchingKey
+    const matchedKey = findMatchingKey(channelMapping['@user1'], chatId);
+    if (matchedKey) {
+      logger.info(`Matched key for chat ${chatId} is ${matchedKey}`);
+    } else {
+      logger.warn(`No matching key found for chat ${chatId} with normalized formats ${JSON.stringify(normalizedFormats)}`);
+    }
+
+    // Debug log the processed message
+    logger.debug(
+      `Processed message from ${chatId}: ${message.text.substring(0, 100)}${message.text.length > 100 ? '...' : ''}`
+    );
+
+    // Debug log available mappings
+    logger.debug(`Available mappings: ${JSON.stringify(Object.keys(channelMapping['@user1']))}`);
+    
     // Check if this chat is in our mapping
     if (isChatInMapping(chatId)) {
-      logger.info(`Received message from chat ${chatId}: ${message.text ? message.text.substring(0, 30) + '...' : '[Media message]'}`);
+      logger.info(`Received message from chat ${chatId}: ${message.text.substring(0, 30)}...`);
 
       // Get message info
       const sender = message.sender ? message.sender.username || message.sender.id : 'Unknown';
 
-      // Check for media information
+      // Check for media, but we won't process it - just log its presence
       const hasMedia = !!message.media;
-      const mediaType = hasMedia ? message.media.className : null;
-      
-      // Extract sender ID in a robust way
-      let senderId = null;
-      if (message.fromId) {
-        if (typeof message.fromId === 'object') {
-          if (message.fromId.userId) senderId = message.fromId.userId.toString();
-          else if (message.fromId.channelId) senderId = message.fromId.channelId.toString();
-          else if (message.fromId.chatId) senderId = message.fromId.chatId.toString();
-        } else {
-          senderId = message.fromId.toString();
-        }
+      if (hasMedia) {
+        logger.info(`Message has media, but media handling is disabled. Message will be processed as text-only.`);
       }
-
-      // Get message raw data for forwarding with media
-      const rawMessage = {
-        id: message.id,
-        fromChat: chatId
-      };
-
-      // Prepare source information for media forwarding
-      // This is the critical part - ensure we have correct chat ID and message ID
-      const sourceInfo = {
-        messageId: message.id,
-        chatId: chatId,
-        peerId: message.peerId,
-        hasPhoto: hasMedia && mediaType === 'MessageMediaPhoto',
-        hasDocument: hasMedia && mediaType === 'MessageMediaDocument',
-        hasVideo: hasMedia && (mediaType === 'MessageMediaVideo' || 
-                              (mediaType === 'MessageMediaDocument' && 
-                               message.media.document && 
-                               message.media.document.mimeType && 
-                               message.media.document.mimeType.startsWith('video/')))
-      };
 
       // Prepare message data for processing
       const messageData = {
         messageId: message.id.toString(),
         chatId: chatId,
-        text: message.text || '',
-        senderId: senderId,
+        text: message.text,
+        senderId: message.fromId ? message.fromId.toString() : null,
         senderUsername: sender,
         date: new Date(message.date * 1000).toISOString(),
         destinationChannels: getDestinationChannels(chatId),
-        // Add media information
-        hasMedia: hasMedia,
-        mediaType: mediaType,
-        sourceInfo: sourceInfo,
-        rawMessage: hasMedia ? JSON.stringify(rawMessage) : null
+        // Add media flag, but it won't be processed
+        hasMedia: hasMedia
       };
-
-      // Log more details for media messages
-      if (hasMedia) {
-        logger.info(`Media message detected: Type=${mediaType}, MessageID=${message.id}, ChatID=${chatId}`);
-        
-        // Log specific media details for debugging
-        if (mediaType === 'MessageMediaPhoto' && message.media.photo) {
-          logger.debug(`Photo details: ${JSON.stringify({
-            id: message.media.photo.id,
-            sizes: message.media.photo.sizes ? message.media.photo.sizes.length : 0,
-            dcId: message.media.photo.dcId
-          })}`);
-        } else if (mediaType === 'MessageMediaDocument' && message.media.document) {
-          logger.debug(`Document details: ${JSON.stringify({
-            id: message.media.document.id,
-            mimeType: message.media.document.mimeType,
-            size: message.media.document.size
-          })}`);
-        }
-      }
 
       // Enqueue message for processing
       await enqueueMessage(messageData);
     } else {
       // Log some useful information for debugging mapping issues
       logger.debug(`Message from unmapped chat ${chatId} (not in our mapping)`);
-      if (config.logging && config.logging.level === 'debug') {
-        logger.debug(`Available mappings: ${JSON.stringify(Object.keys(channelMapping['@user1']))}`);
+      if (config.logging.level === 'debug') {
+        logger.debug(`Available mappings: ${JSON.stringify(channelMapping)}`);
       }
     }
   } catch (error) {

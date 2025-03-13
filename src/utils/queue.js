@@ -19,6 +19,8 @@ try {
         host: config.redis.host,
         port: config.redis.port,
         password: config.redis.password,
+        // Remove enableReadyCheck and maxRetriesPerRequest as they cause issues with Bull
+        connectTimeout: 30000, // Longer timeout
       },
       defaultJobOptions: {
         attempts: config.queue.maxRetries,
@@ -26,6 +28,11 @@ try {
         removeOnFail: 100, // Keep the last 100 failed jobs
         timeout: config.queue.processTimeout * 1000, // Convert to milliseconds
       },
+      settings: {
+        lockDuration: 30000, // 30 seconds
+        stalledInterval: 15000, // 15 seconds
+        maxStalledCount: 3
+      }
     });
 
     // Log queue events
@@ -47,6 +54,19 @@ try {
         data: job.data,
       });
     });
+    
+    // Add handlers for connection events
+    messageQueue.on('connect', () => {
+      logger.info('Queue connected to Redis');
+    });
+    
+    messageQueue.on('disconnect', () => {
+      logger.warn('Queue disconnected from Redis');
+    });
+    
+    messageQueue.on('reconnect', () => {
+      logger.info('Queue reconnected to Redis');
+    });
 
     queueEnabled = true;
     logger.info(`Message queue initialized: ${config.queue.name}`);
@@ -65,85 +85,105 @@ try {
  */
 async function enqueueMessage(messageData) {
   try {
-    if (!messageData || !messageData.messageId) {
-      logger.error('Invalid message data provided to enqueueMessage');
-      return { success: false, error: 'Invalid message data' };
-    }
-    
-    logger.info(`🔍 Processing message ${messageData.messageId} from ${messageData.chatId}`);
-    logger.info(`Message has ${messageData.destinationChannels.length} destination channels: ${JSON.stringify(messageData.destinationChannels)}`);
-    
     // If queue is enabled, use it
     if (queueEnabled && messageQueue) {
-      logger.info(`Adding message ${messageData.messageId} to queue`);
-      const job = await messageQueue.add(messageData, {
-        // Can add job-specific options here if needed
-      });
-      
-      logger.info(`Enqueued message ${messageData.messageId} with job ID ${job.id}`);
-      return job;
+      try {
+        const job = await messageQueue.add(messageData, {
+          // Can add job-specific options here if needed
+          attempts: 3, // Retry up to 3 times
+          backoff: {
+            type: 'exponential',
+            delay: 5000 // Start with 5 second delay, then exponential backoff
+          }
+        });
+        
+        logger.info(`Enqueued message ${messageData.messageId} with job ID ${job.id}`);
+        return job;
+      } catch (queueError) {
+        logger.error(`Error adding job to queue: ${queueError.message}`, { error: queueError });
+        
+        // If we can't queue, try direct processing
+        logger.info(`Falling back to direct processing for message ${messageData.messageId}`);
+        return await directProcessMessage(messageData);
+      }
     } else {
       // Process immediately if queue is disabled
       logger.info(`Processing message ${messageData.messageId} immediately (queue disabled)`);
-      
-      try {
-        const telegramService = require('../services/telegramService');
-        const aiService = require('../services/aiService');
-        
-        // Skip processing if no destination channels
-        if (!messageData.destinationChannels || messageData.destinationChannels.length === 0) {
-          logger.warn(`No destination channels for message ${messageData.messageId}`);
-          return { success: false, reason: 'No destination channels' };
-        }
-        
-        // Classify message
-        const messageType = await aiService.classifyMessage(messageData.text);
-        logger.info(`Message ${messageData.messageId} classified as: ${messageType}`);
-        
-        // TESTING: Allow all messages to be forwarded, even noise
-        // Skip noise messages
-        // if (messageType === 'noise') {
-        //   logger.info(`Skipping noise message ${messageData.messageId}`);
-        //   return { success: true, status: 'skipped', reason: 'Noise message' };
-        // }
-        
-        if (messageType === 'noise') {
-          logger.info(`Message classified as noise but forwarding anyway (for testing)`);
-        }
-        
-        // Format the message based on its type
-        const formattedMessage = await aiService.formatMessage(messageData.text, messageType);
-        
-        // Forward to all destination channels
-        logger.info(`Forwarding message to ${messageData.destinationChannels.length} channels`);
-        const result = await telegramService.forwardMessage(formattedMessage, messageData.destinationChannels);
-        
-        logger.info(`Direct forwarding result: Success=${result.success}, Failure=${result.failure}`);
-        logger.info(`Successful channels: ${JSON.stringify(result.channels.successful)}`);
-        if (result.channels.failed.length > 0) {
-          logger.warn(`Failed channels: ${JSON.stringify(result.channels.failed)}`);
-        }
-        
-        return { 
-          success: result.success > 0, 
-          directForward: true,
-          messageType,
-          forwardResult: result 
-        };
-      } catch (error) {
-        logger.error(`Error processing message directly: ${error.message}`, { error });
-        return { success: false, error: error.message };
-      }
+      return await directProcessMessage(messageData);
     }
   } catch (error) {
     logger.error(`Error enqueueing/processing message: ${error.message}`, { error, messageData });
     // Don't throw so program can continue even if message processing fails
-    return { success: false, error: error.message };
+    return null;
+  }
+}
+
+/**
+ * Process a message directly (no queue)
+ * @param {Object} messageData Message data to process
+ * @returns {Promise<Object>} Processing result
+ */
+async function directProcessMessage(messageData) {
+  try {
+    // Import here to avoid circular dependencies
+    const consumer = require('../consumer');
+    
+    // Process the message directly if consumer exists
+    if (consumer && typeof consumer.processMessage === 'function') {
+      const result = await consumer.processMessage(messageData);
+      logger.info(`Direct processing result: ${JSON.stringify(result)}`);
+      return result;
+    } else {
+      // Basic forwarding without full processing
+      const telegramService = require('../services/telegramService');
+      
+      if (messageData.destinationChannels && messageData.destinationChannels.length > 0) {
+        const formattedMessage = `🔄 Forwarded:\n\n${messageData.text}`;
+        
+        for (const channelId of messageData.destinationChannels) {
+          try {
+            await telegramService.sendMessage(channelId, formattedMessage);
+            logger.info(`Directly forwarded message to ${channelId}`);
+          } catch (error) {
+            logger.error(`Error forwarding to ${channelId}: ${error.message}`);
+          }
+        }
+        
+        return { success: true, directForward: true };
+      } else {
+        logger.warn(`No destination channels for message ${messageData.messageId}`);
+        return { success: false, reason: 'No destination channels' };
+      }
+    }
+  } catch (consumerError) {
+    logger.error(`Error in direct processing: ${consumerError.message}`, { error: consumerError });
+    return { success: false, error: consumerError.message };
+  }
+}
+
+/**
+ * Check Redis connection health
+ * @returns {Promise<boolean>} True if connection is healthy
+ */
+async function checkQueueHealth() {
+  if (!queueEnabled || !messageQueue) {
+    return false;
+  }
+  
+  try {
+    // Try to ping the Redis server
+    const client = messageQueue.client;
+    await client.ping();
+    return true;
+  } catch (error) {
+    logger.error(`Queue health check failed: ${error.message}`);
+    return false;
   }
 }
 
 module.exports = {
   messageQueue,
   enqueueMessage,
-  queueEnabled
+  queueEnabled,
+  checkQueueHealth
 };

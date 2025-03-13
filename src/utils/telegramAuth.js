@@ -22,10 +22,13 @@ async function authenticateTelegram() {
       { 
         connectionRetries: 5,
         useWSS: false,
-        shouldReconnect: true
+        shouldReconnect: true,
+        autoReconnect: true,
+        timeout: 60000,
+
       }
     );
-    
+      
     // Start the client
     await client.start({
       phoneNumber: async () => await input.text('Please enter your phone number: '),
@@ -91,8 +94,10 @@ async function initializeClient() {
         connectionRetries: 10,
         shouldReconnect: true,
         useWSS: false,
-        timeout: 30000, // Increase timeout to 30 seconds
+        autoReconnect:true,
+        timeout: 60000, // Increase timeout to 30 seconds
         retryDelay: 1000 // Delay between connection retries
+
       }
     );
     
