@@ -1,0 +1,94 @@
+[
+    {
+      "name": "Crypto Signals VIP",
+      "description": "Exclusive crypto trading signals and market analysis for VIP members",
+      "type": "private",
+      "visibleHistoryForNewMember": true,
+      "restrictSavingContent": true,
+      "admins": [
+        "@CryptoAIIIForwarderBot"
+      ],
+      "permissions": {
+        "actions": {
+          "sendMessages": false,
+          "sendMedia": false,
+          "addMembers": false,
+          "pinMessages": false,
+          "createTopics": false,
+          "changeGroupInfo": false
+        },
+        "exceptions": {
+          "@CryptoForwarderBot": {
+            "sendMessages": true,
+            "sendMedia": true,
+            "pinMessages": true
+          }
+        },
+        "rateLimit": {
+          "messagesPerMinute": 5,
+          "mediaPerHour": 10
+        }
+      }
+    },
+    {
+      "name": "Crypto Alerts Hub",
+      "description": "Important market alerts and time-sensitive crypto news",
+      "type": "private",
+      "visibleHistoryForNewMember": true,
+      "restrictSavingContent": true,
+      "admins": [
+        "@CryptoAIIIForwarderBot"
+      ],
+      "permissions": {
+        "actions": {
+          "sendMessages": false,
+          "sendMedia": false
+        }
+      }
+    },
+    {
+      "name": "Crypto Trading Community",
+      "description": "Discussion and analysis of cryptocurrency markets",
+      "type": "private",
+      "visibleHistoryForNewMember": true,
+      "admins": [
+        "@CryptoAIIIForwarderBot"
+      ],
+      "userRoles": {
+        "moderator": {
+          "canManageUsers": true,
+          "canDeleteMessages": true
+        },
+        "analyst": {
+          "canPostSignals": true,
+          "canCreatePolls": true
+        }
+      },
+      "messageTemplates": {
+        "welcomeMessage": "Welcome to our trading community! Please read the rules in the General topic.",
+        "signalFormat": "🚨 Signal Alert\nPair: {pair}\nEntry: {entry}\nTarget: {target}\nStop: {stop}"
+      },
+      "webhooks": {
+        "priceAlerts": "https://api.yourservice.com/price-alerts",
+        "newSignals": "https://api.yourservice.com/signals-webhook"
+      },
+      "topics": [
+        {
+          "name": "General",
+          "description": "General discussion about crypto"
+        },
+        {
+          "name": "Signals",
+          "description": "Trading signals and analysis"
+        },
+        {
+          "name": "News",
+          "description": "Latest crypto news and updates"
+        },
+        {
+          "name": "PNL Results",
+          "description": "Track profit and loss from signals"
+        }
+      ]
+    }
+  ]

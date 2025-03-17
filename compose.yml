@@ -50,6 +50,25 @@ services:
       - /app/node_modules
     command: ["node", "src/consumer"]
     restart: unless-stopped
+    
+  pnl-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - DOCKER_ENV=true
+      - REDIS_HOST=redis
+      - PNL_ENABLED=true
+    volumes:
+      - ./:/app
+      - /app/node_modules
+    command: ["npm", "run", "run:pnl"]
+    restart: unless-stopped
 
 volumes:
   redis-data:

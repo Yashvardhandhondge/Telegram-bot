@@ -412,6 +412,149 @@ async function forwardProcessedMessage(messageData) {
   return await forwardMessage(textWithNote, messageData.destinationChannels);
 }
 
+// ----- NEW FUNCTIONS FOR PNL BOT (ADDED, NOT MODIFIED) -----
+
+/**
+ * Get the Telegram client instance
+ * @returns {Object|null} Telegram client instance or null if not initialized
+ */
+function getTelegramClient() {
+  return telegramClient;
+}
+
+/**
+ * Fetch messages from a channel
+ * @param {string} channelId Channel ID to fetch messages from
+ * @param {number} limit Maximum number of messages to fetch
+ * @returns {Promise<Array>} Array of message objects
+ */
+async function getChannelMessages(channelId, limit = 100) {
+  try {
+    // Ensure client is initialized
+    const client = await initializeSender();
+    
+    // Parse channel ID to get main ID and thread ID if present
+    let mainChannelId = channelId;
+    let threadId = null;
+    
+    if (channelId.includes('/')) {
+      [mainChannelId, threadId] = channelId.split('/');
+      threadId = parseInt(threadId);
+    }
+    
+    // Convert to proper format if needed
+    if (!mainChannelId.startsWith('-100')) {
+      mainChannelId = `-100${mainChannelId.replace(/^-/, '')}`;
+    }
+    
+    logger.info(`Fetching ${limit} messages from channel ${mainChannelId}, thread: ${threadId || 'none'}`);
+    
+    // Get messages from the channel
+    const messages = await client.getMessages(mainChannelId, {
+      limit: limit,
+      ...(threadId ? { replyTo: threadId } : {})
+    });
+    
+    logger.info(`Retrieved ${messages.length} messages from channel ${channelId}`);
+    return messages;
+  } catch (error) {
+    logger.error(`Error fetching channel messages: ${error.message}`, { error });
+    throw error;
+  }
+}
+
+/**
+ * Get info about a specific channel
+ * @param {string} channelId Channel ID to get info for
+ * @returns {Promise<Object>} Channel info object
+ */
+async function getChannelInfo(channelId) {
+  try {
+    // Ensure client is initialized
+    const client = await initializeSender();
+    
+    // Parse channel ID
+    let mainChannelId = channelId;
+    if (channelId.includes('/')) {
+      [mainChannelId] = channelId.split('/');
+    }
+    
+    // Convert to proper format if needed
+    if (!mainChannelId.startsWith('-100')) {
+      mainChannelId = `-100${mainChannelId.replace(/^-/, '')}`;
+    }
+    
+    logger.info(`Fetching info for channel ${mainChannelId}`);
+    
+    // Get the entity
+    const entity = await client.getEntity(mainChannelId);
+    
+    // Get full channel info
+    const fullChannel = await client.invoke(new Api.channels.GetFullChannel({
+      channel: entity
+    }));
+    
+    logger.info(`Retrieved info for channel ${channelId}`);
+    
+    return {
+      id: entity.id.toString(),
+      title: entity.title || 'Untitled',
+      type: entity.className,
+      username: entity.username || null,
+      fullInfo: fullChannel?.full_chat || null
+    };
+  } catch (error) {
+    logger.error(`Error fetching channel info: ${error.message}`, { error });
+    throw error;
+  }
+}
+
+/**
+ * Get topics in a supergroup
+ * @param {string} channelId Channel ID of the supergroup
+ * @returns {Promise<Array>} Array of topic objects
+ */
+async function getChannelTopics(channelId) {
+  try {
+    // Ensure client is initialized
+    const client = await initializeSender();
+    
+    // Parse channel ID (remove thread ID if present)
+    let mainChannelId = channelId;
+    if (channelId.includes('/')) {
+      [mainChannelId] = channelId.split('/');
+    }
+    
+    // Convert to proper format if needed
+    if (!mainChannelId.startsWith('-100')) {
+      mainChannelId = `-100${mainChannelId.replace(/^-/, '')}`;
+    }
+    
+    logger.info(`Fetching topics for supergroup ${mainChannelId}`);
+    
+    // Get the entity
+    const entity = await client.getEntity(mainChannelId);
+    
+    // Get forum topics
+    const forumTopics = await client.invoke(new Api.channels.GetForumTopics({
+      channel: entity,
+      limit: 100
+    }));
+    
+    logger.info(`Retrieved ${forumTopics.topics.length} topics from supergroup ${channelId}`);
+    
+    return forumTopics.topics.map(topic => ({
+      id: topic.id,
+      title: topic.title,
+      iconColor: topic.iconColor,
+      topicId: `${mainChannelId}/${topic.id}`
+    }));
+  } catch (error) {
+    logger.error(`Error fetching channel topics: ${error.message}`, { error });
+    throw error;
+  }
+}
+
 module.exports = {
   sendMessage,
   sendMedia,
@@ -422,5 +565,10 @@ module.exports = {
   reinitializeClient,
   isClientHealthy,
   sendPing,
-  testDisconnection
+  testDisconnection,
+  // New exports for PNL Bot
+  getTelegramClient,
+  getChannelMessages,
+  getChannelInfo,
+  getChannelTopics
 };
