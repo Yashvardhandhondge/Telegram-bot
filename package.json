@@ -6,6 +6,7 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "run:listener": "node ./src/listener/index.js",
     "run:consumer": "node ./src/consumer/index.js",
+      "tg": "node ./src/cli/group-manager.js",
     "format": "prettier --write src",
     "lint": "eslint --fix src"
   },
@@ -20,8 +21,9 @@
     "prettier": "^3.5.3"
   },
   "dependencies": {
-    "axios": "^1.8.1",
+    "axios": "^1.8.3",
     "bull": "^4.16.5",
+    "commander": "^13.1.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
@@ -31,7 +33,7 @@
     "input": "^1.0.1",
     "morgan": "^1.10.0",
     "node-telegram-bot-api": "^0.66.0",
-    "openai": "^4.86.2",
+    "openai": "^4.87.3",
     "redis": "^4.7.0",
     "telegram": "^2.26.22",
     "winston": "^3.17.0"
