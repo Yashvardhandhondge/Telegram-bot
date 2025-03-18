@@ -68,10 +68,6 @@
         "welcomeMessage": "Welcome to our trading community! Please read the rules in the General topic.",
         "signalFormat": "🚨 Signal Alert\nPair: {pair}\nEntry: {entry}\nTarget: {target}\nStop: {stop}"
       },
-      "webhooks": {
-        "priceAlerts": "https://api.yourservice.com/price-alerts",
-        "newSignals": "https://api.yourservice.com/signals-webhook"
-      },
       "topics": [
         {
           "name": "General",

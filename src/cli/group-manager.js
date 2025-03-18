@@ -3,10 +3,10 @@
 const fs = require('fs');
 const path = require('path');
 const { program } = require('commander');
-const { initializeClient } = require('../utils/telegramAuth');
 const { Api } = require('telegram');
 const logger = require('../utils/logger');
 const groupAiService = require('../services/groupAiService');
+const channelAuth = require('./channel-auth-manager');
 require('dotenv').config();
 
 /**
@@ -26,16 +26,9 @@ async function createOrUpdateGroups(configPath) {
       throw new Error('Config must be an array of group configurations');
     }
     
-    // Initialize Telegram client
-    const client = await initializeClient();
-    logger.info('Telegram client initialized');
-    
-    // Ensure client is connected
-    if (!client.connected) {
-      logger.info('Connecting to Telegram...');
-      await client.connect();
-      logger.info('Connected to Telegram');
-    }
+    // Initialize Telegram client using phone number authentication
+    // This always creates a new session separate from the main app
+    const { client, phoneNumber } = await channelAuth.authenticateForChannelCreation();
     
     // Process each group in the config
     const groupMapping = {};
@@ -54,6 +47,10 @@ async function createOrUpdateGroups(configPath) {
     const outputPath = path.join(process.cwd(), 'group-mapping.json');
     fs.writeFileSync(outputPath, JSON.stringify(groupMapping, null, 2));
     logger.info(`Group mapping saved to: ${outputPath}`);
+    
+    // Disconnect the client when done
+    await client.disconnect();
+    logger.info('Disconnected from Telegram');
     
     return groupMapping;
   } catch (error) {
