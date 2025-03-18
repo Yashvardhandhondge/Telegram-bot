@@ -24,6 +24,7 @@ services:
     environment:
       - DOCKER_ENV=true
       - REDIS_HOST=redis
+      - PNL_ENABLED=false  # Explicitly disable PNL in main app
     ports:
       - "3000:3000"
     volumes:
@@ -31,6 +32,12 @@ services:
       - /app/node_modules
     command: ["npm", "run", "run:listener"]
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M  # Limited memory to avoid conflicts
+        reservations:
+          memory: 256M
 
   consumer:
     build:
@@ -39,17 +46,24 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      app:
+        condition: service_started
     env_file:
       - .env
     environment:
       - DOCKER_ENV=true
       - REDIS_HOST=redis
       - RUN_CONSUMER=true
+      - PNL_ENABLED=false  # Explicitly disable PNL in consumer
     volumes:
       - ./:/app
       - /app/node_modules
     command: ["node", "src/consumer"]
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 384M  # Limited memory to avoid conflicts
     
   pnl-bot:
     build:
@@ -58,17 +72,24 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      app:
+        condition: service_started
     env_file:
       - .env
     environment:
       - DOCKER_ENV=true
       - REDIS_HOST=redis
       - PNL_ENABLED=true
+      - USE_SEPARATE_CLIENT=true  # New flag to use separate client
     volumes:
       - ./:/app
       - /app/node_modules
     command: ["npm", "run", "run:pnl"]
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M  # Limited memory to avoid conflicts
 
 volumes:
   redis-data:

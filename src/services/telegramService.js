@@ -4,131 +4,57 @@ const { Api } = require('telegram');
 const config = require('../config');
 const logger = require('../utils/logger');
 const axios = require('axios');
+const { initializeClient, sendPing } = require('../utils/telegramAuth');
 
-// Global Telegram client instance
+// Global Telegram client instances
 let telegramClient;
+let pnlTelegramClient;
 
 // Get Telegram Bot token from environment
 const botToken = process.env.TELEGRAM_BOT_TOKEN;
 
 /**
  * Initialize the Telegram client for sending messages
+ * @param {boolean} isPnlBot Whether this is for the PNL Bot
  * @returns {Promise<Object>} Telegram client instance
  */
-async function initializeSender() {
+async function initializeSender(isPnlBot = false) {
   try {
-    // Initialize Telegram client if not already initialized
-    if (!telegramClient) {
-      telegramClient = await initializeClient();
-      logger.info('Telegram sender initialized');
-      
-      // Ensure client is connected
-      if (!telegramClient.connected) {
-        logger.info('Connecting telegram sender client...');
-        await telegramClient.connect();
-        logger.info('Telegram sender client connected');
+    // Choose the appropriate client based on isPnlBot
+    if (isPnlBot) {
+      // Initialize PNL Telegram client if not already initialized
+      if (!pnlTelegramClient) {
+        pnlTelegramClient = await initializeClient(true); // true = isPnlBot
+        logger.info('PNL Telegram sender initialized');
+        
+        // Ensure client is connected
+        if (!pnlTelegramClient.connected) {
+          logger.info('Connecting PNL telegram sender client...');
+          await pnlTelegramClient.connect();
+          logger.info('PNL Telegram sender client connected');
+        }
       }
+      
+      return pnlTelegramClient;
+    } else {
+      // Initialize main Telegram client if not already initialized
+      if (!telegramClient) {
+        telegramClient = await initializeClient(false); // false = not PNL Bot
+        logger.info('Main Telegram sender initialized');
+        
+        // Ensure client is connected
+        if (!telegramClient.connected) {
+          logger.info('Connecting main telegram sender client...');
+          await telegramClient.connect();
+          logger.info('Main Telegram sender client connected');
+        }
+      }
+      
+      return telegramClient;
     }
-    
-    return telegramClient;
   } catch (error) {
     logger.error(`Failed to initialize Telegram sender: ${error.message}`, { error });
     throw error;
-  }
-}
-
-/**
- * Initialize Telegram client with existing session or new authentication
- * @returns {Promise<TelegramClient>} Authenticated Telegram client
- */
-async function initializeClient() {
-  try {
-    const stringSession = new StringSession(config.telegram.sessionString || '');
-    
-    const client = new TelegramClient(
-      stringSession,
-      config.telegram.apiId,
-      config.telegram.apiHash,
-      {
-        connectionRetries: 10,
-        shouldReconnect: true,
-        useWSS: false,
-        timeout: 30000, // Increase timeout to 30 seconds
-        retryDelay: 1000 // Delay between connection retries
-      }
-    );
-    
-    // If we have a session string, try to connect directly
-    if (config.telegram.sessionString) {
-      try {
-        logger.info('Connecting to Telegram with existing session...');
-        await client.connect();
-        
-        // Verify connection by getting self info
-        const me = await client.getMe();
-        logger.info(`Connected as: ${me.firstName} ${me.lastName || ''} (@${me.username || 'no username'})`);
-        
-        // Check if we're still authenticated
-        if (await client.checkAuthorization()) {
-          logger.info('Successfully connected to Telegram using existing session');
-        } else {
-          // If not authorized, handle session expiration
-          logger.error('Session expired, cannot continue without valid session');
-          throw new Error('Session expired');
-        }
-      } catch (error) {
-        logger.error(`Error connecting with existing session: ${error.message}`, { error });
-        throw error;
-      }
-    } else {
-      // No session string provided
-      logger.error('No session string provided, cannot initialize client');
-      throw new Error('No session string provided');
-    }
-    
-    // Add connection maintenance handler
-    setInterval(async () => {
-      try {
-        if (client.connected) {
-          await sendPing(client);
-        } else {
-          logger.warn('Client disconnected, attempting to reconnect...');
-          await client.connect();
-          logger.info('Reconnected successfully');
-        }
-      } catch (error) {
-        logger.error(`Error in keep-alive ping: ${error.message}`, { error });
-      }
-    }, 60000); // Every minute
-    
-    return client;
-  } catch (error) {
-    logger.error(`Failed to initialize Telegram client: ${error.message}`, { error });
-    throw error;
-  }
-}
-
-/**
- * Send a ping to verify the connection
- * @param {TelegramClient} client Telegram client
- * @returns {Promise<boolean>} True if ping successful
- */
-async function sendPing(client) {
-  try {
-    if (!client.connected) {
-      return false;
-    }
-    
-    // Use the correct API for pinging
-    const result = await client.invoke(new Api.Ping({
-      pingId: BigInt(Math.floor(Math.random() * 1000000000))
-    }));
-    
-    logger.debug('Ping successful');
-    return true;
-  } catch (error) {
-    logger.error(`Ping failed: ${error.message}`);
-    return false;
   }
 }
 
@@ -184,9 +110,10 @@ function parseChatId(chatId) {
  * Send a message to a Telegram chat using Bot API
  * @param {string} chatId Chat ID to send the message to
  * @param {string} text Message text to send
+ * @param {boolean} isPnlMessage Whether this is a PNL message
  * @returns {Promise<boolean>} True if message was sent successfully, false otherwise
  */
-async function sendMessage(chatId, text) {
+async function sendMessage(chatId, text, isPnlMessage = false) {
   try {
     if (!botToken) {
       logger.error('Cannot send message: TELEGRAM_BOT_TOKEN not set');
@@ -218,11 +145,11 @@ async function sendMessage(chatId, text) {
     }
     
     // Send request to Telegram Bot API
-    logger.debug(`Sending message to chat ${targetChatId} via Bot API`);
+    logger.debug(`Sending message to chat ${targetChatId} via Bot API${isPnlMessage ? ' (PNL)' : ''}`);
     const response = await axios.post(`https://api.telegram.org/bot${botToken}/sendMessage`, params);
     
     if (response.data && response.data.ok) {
-      logger.info(`✅ Successfully sent message to chat ${targetChatId} via Bot API`);
+      logger.info(`✅ Successfully sent message to chat ${targetChatId} via Bot API${isPnlMessage ? ' (PNL)' : ''}`);
       return true;
     } else {
       logger.error(`Failed to send message: ${JSON.stringify(response.data)}`);
@@ -243,9 +170,10 @@ async function sendMessage(chatId, text) {
  * Forward a message to all destination channels
  * @param {string|Object} messageData Formatted message text or message data object
  * @param {string[]} destinationChannels Array of destination channel IDs
+ * @param {boolean} isPnlMessage Whether this is for PNL bot
  * @returns {Promise<Object>} Object with success and failure counts
  */
-async function forwardMessage(messageData, destinationChannels) {
+async function forwardMessage(messageData, destinationChannels, isPnlMessage = false) {
   const result = {
     success: 0,
     failure: 0,
@@ -280,7 +208,7 @@ async function forwardMessage(messageData, destinationChannels) {
       
       // Send message
       if (text && text.trim() !== '') {
-        success = await sendMessage(channelId, text);
+        success = await sendMessage(channelId, text, isPnlMessage);
         if (success) {
           logger.info(`✅ Successfully sent message to channel ${channelId}`);
         } else {
@@ -311,49 +239,50 @@ async function forwardMessage(messageData, destinationChannels) {
 
 /**
  * Reinitialize the Telegram client after disconnection
+ * @param {boolean} isPnlBot Whether to reinitialize the PNL client
  * @returns {Promise<TelegramClient>} Reinitialized client
  */
-async function reinitializeClient() {
+async function reinitializeClient(isPnlBot = false) {
   try {
-    // Clean up existing client if any
-    if (telegramClient) {
-      try {
-        logger.info('Disconnecting existing client');
-        await telegramClient.disconnect();
-      } catch (e) {
-        // Ignore disconnection errors
-        logger.warn(`Error during client disconnection: ${e.message}`);
+    if (isPnlBot) {
+      // Clean up existing PNL client if any
+      if (pnlTelegramClient) {
+        try {
+          logger.info('Disconnecting existing PNL client');
+          await pnlTelegramClient.disconnect();
+        } catch (e) {
+          // Ignore disconnection errors
+          logger.warn(`Error during PNL client disconnection: ${e.message}`);
+        }
+        pnlTelegramClient = null;
       }
-      telegramClient = null;
+      
+      // Create a fresh PNL client
+      const newClient = await initializeClient(true);
+      pnlTelegramClient = newClient;
+      
+      logger.info('PNL Telegram client reinitialized successfully');
+      return pnlTelegramClient;
+    } else {
+      // Clean up existing main client if any
+      if (telegramClient) {
+        try {
+          logger.info('Disconnecting existing client');
+          await telegramClient.disconnect();
+        } catch (e) {
+          // Ignore disconnection errors
+          logger.warn(`Error during client disconnection: ${e.message}`);
+        }
+        telegramClient = null;
+      }
+      
+      // Create a fresh client
+      const newClient = await initializeClient(false);
+      telegramClient = newClient;
+      
+      logger.info('Main Telegram client reinitialized successfully');
+      return telegramClient;
     }
-    
-    // Create a fresh client
-    const stringSession = new StringSession(config.telegram.sessionString || '');
-    
-    const newClient = new TelegramClient(
-      stringSession,
-      config.telegram.apiId,
-      config.telegram.apiHash,
-      {
-        connectionRetries: 5,
-        useWSS: false,
-        shouldReconnect: true,
-        timeout: 60000 // 60 second timeout
-      }
-    );
-    
-    // Connect the client
-    await newClient.connect();
-    
-    // Verify connection
-    const me = await newClient.getMe();
-    logger.info(`Reinitialized client connected as: ${me.firstName} ${me.lastName || ''} (@${me.username || 'no username'})`);
-    
-    // Update global client reference
-    telegramClient = newClient;
-    
-    logger.info('Telegram client reinitialized successfully');
-    return telegramClient;
   } catch (error) {
     logger.error(`Failed to reinitialize client: ${error.message}`);
     throw error;
@@ -362,76 +291,49 @@ async function reinitializeClient() {
 
 /**
  * Test function to manually trigger a disconnection
+ * @param {boolean} isPnlBot Whether to disconnect the PNL client
  * @returns {Promise<boolean>} True if client was disconnected
  */
-async function testDisconnection() {
+async function testDisconnection(isPnlBot = false) {
   logger.info('Manually triggering disconnection for testing...');
-  if (telegramClient && telegramClient.connected) {
-    await telegramClient.disconnect();
-    logger.info('Client manually disconnected for testing');
-    return true;
+  
+  if (isPnlBot) {
+    if (pnlTelegramClient && pnlTelegramClient.connected) {
+      await pnlTelegramClient.disconnect();
+      logger.info('PNL client manually disconnected for testing');
+      return true;
+    }
+  } else {
+    if (telegramClient && telegramClient.connected) {
+      await telegramClient.disconnect();
+      logger.info('Main client manually disconnected for testing');
+      return true;
+    }
   }
+  
   return false;
 }
-
-// Keep the media handling code but don't use it
-// This will be maintained for future reference
-
-/**
- * Download media from a message
- * This function is kept for future reference but is not used in the current implementation
- */
-async function downloadMedia(messageData) {
-  logger.info('Media download functionality is disabled');
-  return null;
-}
-
-/**
- * Send a media message with the appropriate method based on file type
- * This function is kept for future reference but is not used in the current implementation
- */
-async function sendMedia(chatId, mediaPath, mediaType, caption = '') {
-  logger.info('Media sending functionality is disabled');
-  return false;
-}
-
-/**
- * Forward a processed message with media to all destination channels
- * This function is kept for future reference but is not used in the current implementation
- */
-async function forwardProcessedMessage(messageData) {
-  logger.info('Media forwarding functionality is disabled, using text-only forwarding');
-  
-  // Create a text-only message with a note about media
-  const text = messageData.formattedText || messageData.text || '';
-  const textWithNote = messageData.hasMedia 
-    ? `${text}\n\n[Media attachment not forwarded - media handling disabled]` 
-    : text;
-  
-  // Use the regular text forwarding
-  return await forwardMessage(textWithNote, messageData.destinationChannels);
-}
-
-// ----- NEW FUNCTIONS FOR PNL BOT (ADDED, NOT MODIFIED) -----
 
 /**
  * Get the Telegram client instance
+ * @param {boolean} isPnlBot Whether to get the PNL client
  * @returns {Object|null} Telegram client instance or null if not initialized
  */
-function getTelegramClient() {
-  return telegramClient;
+function getTelegramClient(isPnlBot = false) {
+  return isPnlBot ? pnlTelegramClient : telegramClient;
 }
 
 /**
  * Fetch messages from a channel
  * @param {string} channelId Channel ID to fetch messages from
  * @param {number} limit Maximum number of messages to fetch
+ * @param {boolean} isPnlBot Whether to use the PNL client
  * @returns {Promise<Array>} Array of message objects
  */
-async function getChannelMessages(channelId, limit = 100) {
+async function getChannelMessages(channelId, limit = 100, isPnlBot = false) {
   try {
     // Ensure client is initialized
-    const client = await initializeSender();
+    const client = await initializeSender(isPnlBot);
     
     // Parse channel ID to get main ID and thread ID if present
     let mainChannelId = channelId;
@@ -466,12 +368,13 @@ async function getChannelMessages(channelId, limit = 100) {
 /**
  * Get info about a specific channel
  * @param {string} channelId Channel ID to get info for
+ * @param {boolean} isPnlBot Whether to use the PNL client
  * @returns {Promise<Object>} Channel info object
  */
-async function getChannelInfo(channelId) {
+async function getChannelInfo(channelId, isPnlBot = false) {
   try {
     // Ensure client is initialized
-    const client = await initializeSender();
+    const client = await initializeSender(isPnlBot);
     
     // Parse channel ID
     let mainChannelId = channelId;
@@ -512,12 +415,13 @@ async function getChannelInfo(channelId) {
 /**
  * Get topics in a supergroup
  * @param {string} channelId Channel ID of the supergroup
+ * @param {boolean} isPnlBot Whether to use the PNL client
  * @returns {Promise<Array>} Array of topic objects
  */
-async function getChannelTopics(channelId) {
+async function getChannelTopics(channelId, isPnlBot = false) {
   try {
     // Ensure client is initialized
-    const client = await initializeSender();
+    const client = await initializeSender(isPnlBot);
     
     // Parse channel ID (remove thread ID if present)
     let mainChannelId = channelId;
@@ -555,12 +459,27 @@ async function getChannelTopics(channelId) {
   }
 }
 
+/**
+ * Forward a processed message with media to all destination channels
+ * @param {Object} messageData Message data with media info
+ * @param {boolean} isPnlMessage Whether this is a PNL message
+ * @returns {Promise<Object>} Forward result object
+ */
+async function forwardProcessedMessage(messageData, isPnlMessage = false) {
+  // Create a text-only message with a note about media
+  const text = messageData.formattedText || messageData.text || '';
+  const textWithNote = messageData.hasMedia 
+    ? `${text}\n\n[Media attachment not forwarded - media handling disabled]` 
+    : text;
+  
+  // Use the regular text forwarding
+  return await forwardMessage(textWithNote, messageData.destinationChannels, isPnlMessage);
+}
+
 module.exports = {
   sendMessage,
-  sendMedia,
   forwardMessage,
   forwardProcessedMessage,
-  downloadMedia,
   initializeSender,
   reinitializeClient,
   isClientHealthy,

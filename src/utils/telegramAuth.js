@@ -80,11 +80,21 @@ async function sendPing(client) {
 
 /**
  * Initialize Telegram client with existing session or new authentication
+ * @param {boolean} isPnlBot Whether this client is for the PNL bot
  * @returns {Promise<TelegramClient>} Authenticated Telegram client
  */
-async function initializeClient() {
+async function initializeClient(isPnlBot = false) {
   try {
-    const stringSession = new StringSession(config.telegram.sessionString || '');
+    // Use PNL_TELEGRAM_SESSION_STRING for pnl-bot if available
+    const sessionString = isPnlBot && process.env.PNL_TELEGRAM_SESSION_STRING 
+      ? process.env.PNL_TELEGRAM_SESSION_STRING 
+      : config.telegram.sessionString || '';
+    
+    if (isPnlBot) {
+      logger.info('Initializing Telegram client for PNL Bot');
+    }
+    
+    const stringSession = new StringSession(sessionString);
     
     const client = new TelegramClient(
       stringSession,
@@ -94,17 +104,17 @@ async function initializeClient() {
         connectionRetries: 10,
         shouldReconnect: true,
         useWSS: false,
-        autoReconnect:true,
-        timeout: 60000, // Increase timeout to 30 seconds
-        retryDelay: 1000 // Delay between connection retries
-
+        autoReconnect: true,
+        timeout: 60000, // Increase timeout to 60 seconds
+        retryDelay: 1000, // Delay between connection retries
+        floodSleepThreshold: isPnlBot ? 60 : 20 // Increase threshold for PNL bot to reduce conflicts
       }
     );
     
     // If we have a session string, try to connect directly
-    if (config.telegram.sessionString) {
+    if (sessionString) {
       try {
-        logger.info('Connecting to Telegram with existing session...');
+        logger.info(`Connecting to Telegram with existing session ${isPnlBot ? '(PNL Bot)' : ''}...`);
         await client.connect();
         
         // Verify connection by getting self info
@@ -129,6 +139,12 @@ async function initializeClient() {
           logger.info('New authentication successful');
           logger.info('Update your .env file with this new session string:');
           logger.info(newSessionString);
+          
+          if (isPnlBot) {
+            logger.info('For PNL Bot, add this to your .env as PNL_TELEGRAM_SESSION_STRING');
+          } else {
+            logger.info('Add this to your .env as TELEGRAM_SESSION_STRING');
+          }
         }
       } catch (error) {
         logger.error(`Error connecting with existing session: ${error.message}`, { error });
@@ -153,6 +169,12 @@ async function initializeClient() {
         logger.info('New authentication successful');
         logger.info('Update your .env file with this new session string:');
         logger.info(newSessionString);
+        
+        if (isPnlBot) {
+          logger.info('For PNL Bot, add this to your .env as PNL_TELEGRAM_SESSION_STRING');
+        } else {
+          logger.info('Add this to your .env as TELEGRAM_SESSION_STRING');
+        }
       }
     } else {
       // No session string provided, authenticate from scratch
@@ -160,20 +182,25 @@ async function initializeClient() {
       await authenticateTelegram();
     }
     
-    // Add connection maintenance handler
+    // Tag this client for easier debugging
+    client.isPnlBot = isPnlBot;
+    
+    // Add connection maintenance handler with different intervals to avoid conflicts
+    const interval = isPnlBot ? 75000 : 60000; // Different ping intervals
+    
     setInterval(async () => {
       try {
         if (client.connected) {
           await sendPing(client);
         } else {
-          logger.warn('Client disconnected, attempting to reconnect...');
+          logger.warn(`Client disconnected${isPnlBot ? ' (PNL Bot)' : ''}, attempting to reconnect...`);
           await client.connect();
           logger.info('Reconnected successfully');
         }
       } catch (error) {
         logger.error(`Error in keep-alive ping: ${error.message}`, { error });
       }
-    }, 60000); // Every minute
+    }, interval);
     
     return client;
   } catch (error) {

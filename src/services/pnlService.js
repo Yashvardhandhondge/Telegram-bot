@@ -87,13 +87,28 @@ async function processMessage(message) {
     
     logger.info(`Processing message from PNL source ${message.chatId} with destination ${destinationChannel}`);
     
-    // Check if message is a trading signal
+    // Check if message type is a crypto signal
     if (message.messageType !== 'crypto_signal') {
       logger.debug(`Message ${message.messageId} is not a crypto signal`);
       return false;
     }
     
-    logger.info(`Processing potential trading signal: ${message.messageId}`);
+    // Check for leverage trading keywords
+    const lowerText = message.text.toLowerCase();
+    const hasLeverageKeywords = 
+      lowerText.includes('leverage') || 
+      lowerText.includes('lev') ||
+      lowerText.includes('long set-up') || 
+      lowerText.includes('short set-up') ||
+      (lowerText.includes('profits') && 
+        (lowerText.includes('10x') || lowerText.includes('20x') || lowerText.includes('50x') || lowerText.includes('100x')));
+    
+    if (!hasLeverageKeywords) {
+      logger.info(`Message ${message.messageId} does not appear to be a leverage trading signal, skipping`);
+      return false;
+    }
+    
+    logger.info(`Processing potential leverage trading signal: ${message.messageId}`);
     
     // Parse the signal
     const signal = parseSignal(message.text);
@@ -109,7 +124,7 @@ async function processMessage(message) {
     // Store the signal in Redis
     await storeSignal(signal, message);
     
-    logger.info(`Stored trading signal for ${signal.pair}: ${JSON.stringify(signal)}`);
+    logger.info(`Stored leverage trading signal for ${signal.pair}: ${JSON.stringify(signal)}`);
     return true;
   } catch (error) {
     logger.error(`Error processing message for PNL: ${error.message}`, { error });
@@ -126,6 +141,23 @@ function parseSignal(text) {
   try {
     // Convert text to lowercase for matching
     const lowerText = text.toLowerCase();
+
+    // Check if this is a leverage signal by looking for leverage indicators
+    const isLeverageSignal = 
+      lowerText.includes('leverage') || 
+      lowerText.includes('lev') || 
+      lowerText.includes('long set-up') || 
+      lowerText.includes('short set-up') ||
+      lowerText.includes('profits') && (lowerText.includes('10x') || lowerText.includes('20x') || lowerText.includes('50x') || lowerText.includes('100x')) ||
+      (lowerText.includes('long') || lowerText.includes('short')) && lowerText.includes('profits');
+    
+    // Skip if it's not a leverage signal
+    if (!isLeverageSignal) {
+      logger.debug('Skipping non-leverage signal');
+      return null;
+    }
+    
+    logger.info('Detected leverage signal, processing...');
 
     // NEW: detect test signals with specific emojis and format
     if (text.includes('📈 SIGNAL:') || text.includes('📉 SIGNAL:')) {
@@ -194,12 +226,11 @@ function parseSignal(text) {
         timestamp: new Date().toISOString(),
         completed: false,
         status: 'ACTIVE',
-        originalText: text
+        originalText: text,
+        isLeverageSignal: true,
+        leverage: extractLeverage(text) || 'Unknown'
       };
     }
-    
-    // Convert to lowercase for easier matching
-  
     
     // Basic validation - must include buy/sell and some targets
     if (!((lowerText.includes('buy') || lowerText.includes('sell') || lowerText.includes('long') || lowerText.includes('short')) && 
@@ -208,9 +239,14 @@ function parseSignal(text) {
     }
     
     // Extract trading pair
-    const pairRegex = /\b([a-z0-9]{2,10}\/[a-z0-9]{2,10})\b|\b([a-z0-9]{2,10}[/|-][a-z0-9]{2,10})\b|\b([a-z0-9]{1,10})\b/i;
+    const pairRegex = /\b([a-z0-9]{2,10}\/[a-z0-9]{2,10})\b|\b([a-z0-9]{2,10}[/|-][a-z0-9]{2,10})\b|\b#([a-z0-9]{1,10}\/[a-z0-9]{2,10})\b|\b#([a-z0-9]{1,10})\b|\b([a-z0-9]{1,10})\b/i;
     const pairMatch = text.match(pairRegex);
     let pair = pairMatch ? pairMatch[0].toUpperCase() : null;
+    
+    // Remove # if present
+    if (pair && pair.startsWith('#')) {
+      pair = pair.substring(1);
+    }
     
     // Determine if BTC, ETH or USDT pair if not explicitly stated
     if (pair && !pair.includes('/') && !pair.includes('-')) {
@@ -317,10 +353,35 @@ function parseSignal(text) {
       timestamp: new Date().toISOString(),
       completed: false,
       status: 'ACTIVE',
-      originalText: text
+      originalText: text,
+      isLeverageSignal: true,
+      leverage: extractLeverage(text) || 'Unknown'
     };
   } catch (error) {
     logger.error(`Error parsing signal: ${error.message}`, { error });
+    return null;
+  }
+}
+
+/**
+ * Extract leverage multiplier from signal text
+ * @param {string} text Signal text
+ * @returns {string|null} Leverage multiplier or null if not found
+ */
+function extractLeverage(text) {
+  try {
+    // Look for common leverage patterns
+    const leverageRegex = /(\d+)x\s*(lev|leverage)|with\s*(\d+)x/i;
+    const leverageMatch = text.match(leverageRegex);
+    
+    if (leverageMatch) {
+      // Return the first capturing group that has a match
+      return `${leverageMatch[1] || leverageMatch[3]}x`;
+    }
+    
+    return null;
+  } catch (error) {
+    logger.error(`Error extracting leverage: ${error.message}`);
     return null;
   }
 }
@@ -366,6 +427,7 @@ async function storeSignal(signal, message) {
       // Format basic info for notification
       const emoji = signal.direction === 'BUY' ? '📈' : '📉';
       const direction = signal.direction === 'BUY' ? 'LONG' : 'SHORT';
+      const leverageInfo = signal.leverage ? `(${signal.leverage} Leverage)` : '';
       let targetsList = '';
       if (signal.targets && signal.targets.length > 0) {
         targetsList = signal.targets.map(t =>
@@ -373,7 +435,7 @@ async function storeSignal(signal, message) {
         ).join('\n');
       }
       
-      const messageText = `${emoji} NEW SIGNAL TRACKED: ${signal.pair} ${direction}
+      const messageText = `${emoji} NEW LEVERAGE SIGNAL TRACKED: ${signal.pair} ${direction} ${leverageInfo}
       
 Entry: ${signal.entryPrice}
 ${targetsList ? targetsList + '\n' : ''}${signal.stopLoss ? `Stop Loss: ${signal.stopLoss}\n` : ''}
@@ -629,8 +691,9 @@ async function postCompletionUpdate(signal) {
 function createTargetHitMessage(signal, target) {
   const emoji = signal.direction === 'BUY' ? '📈' : '📉';
   const direction = signal.direction === 'BUY' ? 'LONG' : 'SHORT';
+  const leverageInfo = signal.leverage ? `(${signal.leverage} Leverage)` : '';
   
-  return `${emoji} TARGET ${target.number} HIT! ${signal.pair} ${direction}
+  return `${emoji} TARGET ${target.number} HIT! ${signal.pair} ${direction} ${leverageInfo}
     
 Entry: ${signal.entryPrice}
 Target ${target.number}: ${target.price} ✅
@@ -648,6 +711,7 @@ Remaining targets: ${signal.targets.filter(t => !t.hit).length}`;
 function createStopLossMessage(signal) {
   const emoji = '🛑';
   const direction = signal.direction === 'BUY' ? 'LONG' : 'SHORT';
+  const leverageInfo = signal.leverage ? `(${signal.leverage} Leverage)` : '';
   
   const hitTargets = signal.targets.filter(t => t.hit);
   const missedTargets = signal.targets.filter(t => !t.hit);
@@ -668,7 +732,7 @@ function createStopLossMessage(signal) {
     profitLoss = overallPL > 0 ? `+${overallPL.toFixed(2)}%` : `${overallPL.toFixed(2)}%`;
   }
   
-  let message = `${emoji} STOP LOSS HIT! ${signal.pair} ${direction}
+  let message = `${emoji} STOP LOSS HIT! ${signal.pair} ${direction} ${leverageInfo}
     
 Entry: ${signal.entryPrice}
 Stop Loss: ${signal.stopLoss} ❌
@@ -695,12 +759,13 @@ Signal status: STOPPED`;
 function createCompletionMessage(signal) {
   const emoji = signal.direction === 'BUY' ? '🚀' : '💰';
   const direction = signal.direction === 'BUY' ? 'LONG' : 'SHORT';
+  const leverageInfo = signal.leverage ? `(${signal.leverage} Leverage)` : '';
   
   // Calculate average profit
   const totalProfit = signal.targets.reduce((sum, target) => sum + parseFloat(target.profitPercent), 0);
   const avgProfit = (totalProfit / signal.targets.length).toFixed(2);
   
-  return `${emoji} ALL TARGETS HIT! ${signal.pair} ${direction}
+  return `${emoji} ALL TARGETS HIT! ${signal.pair} ${direction} ${leverageInfo}
     
 Entry: ${signal.entryPrice}
 Targets: ${signal.targets.map(t => t.price).join(', ')} ✅
@@ -709,12 +774,6 @@ Average Profit: +${avgProfit}% 💰
 Signal status: COMPLETED ✨`;
 }
 
-/**
- * Send a PNL update to the specified channel
- * @param {string} message Message to send
- * @param {string} channelId Channel ID to send to (from signal destination or config)
- * @returns {Promise<void>}
- */
 /**
  * Send a PNL update to the specified channel
  * @param {string} message Message to send
@@ -767,7 +826,7 @@ async function sendPnlUpdate(message, channelId) {
       
       // Try with telegramService as fallback
       logger.info(`Trying with telegramService as fallback...`);
-      const telegramResult = await telegramService.sendMessage(destinationChannel, message);
+      const telegramResult = await telegramService.sendMessage(destinationChannel, message, true); // true = isPnlMessage
       
       if (telegramResult) {
         logger.info(`Successfully sent PNL update via telegramService`);
@@ -972,7 +1031,7 @@ function createSummaryMessage(stats, periodName) {
   const winRateEmoji = stats.winRate >= 70 ? '🔥' : stats.winRate >= 50 ? '✅' : '⚠️';
   const profitEmoji = stats.netProfit > 0 ? '💰' : '📉';
   
-  return `📊 ${periodName} PNL Summary
+  return `📊 ${periodName} Leverage PNL Summary
 
 Total Signals: ${stats.total}
 ✅ Successful: ${stats.successful}
@@ -1004,11 +1063,10 @@ async function backfillSignals(channelId, limit = 100) {
     }
     
     // Initialize Telegram client to fetch messages
-    const telegramService = require('./telegramService');
-    await telegramService.initializeSender();
+    await telegramService.initializeSender(true); // true = isPnlBot
     
     // Get the client
-    const client = telegramService.getTelegramClient();
+    const client = telegramService.getTelegramClient(true); // true = isPnlBot
     
     if (!client) {
       throw new Error('Failed to get Telegram client');
@@ -1044,6 +1102,21 @@ async function backfillSignals(channelId, limit = 100) {
     for (const msg of messages) {
       // Skip messages without text
       if (!msg.text) continue;
+      
+      // Check for leverage trading keywords
+      const lowerText = msg.text.toLowerCase();
+      const hasLeverageKeywords = 
+        lowerText.includes('leverage') || 
+        lowerText.includes('lev') ||
+        lowerText.includes('long set-up') || 
+        lowerText.includes('short set-up') ||
+        (lowerText.includes('profits') && 
+          (lowerText.includes('10x') || lowerText.includes('20x') || lowerText.includes('50x') || lowerText.includes('100x')));
+      
+      if (!hasLeverageKeywords) {
+        logger.debug(`Message does not appear to be a leverage trading signal, skipping`);
+        continue;
+      }
       
       // Prepare message data in the format expected by processMessage
       const messageData = {

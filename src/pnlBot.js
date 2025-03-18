@@ -8,12 +8,15 @@ const config = require('./config');
 const pnlService = require('./services/pnlService');
 const telegramService = require('./services/telegramService');
 
+// Create a PNL-specific logger
+const pnlLogger = logger.child({ service: 'pnl-bot' });
+
 /**
  * Initialize the PNL bot
  */
 async function initialize() {
   try {
-    logger.info('Initializing PNL Bot');
+    pnlLogger.info('Initializing PNL Bot');
     
     // Initialize PNL service
     const initialized = await pnlService.initialize();
@@ -22,12 +25,12 @@ async function initialize() {
       throw new Error('Failed to initialize PNL service');
     }
     
-    // Initialize Telegram service
-    await telegramService.initializeSender();
+    // Initialize Telegram service with PNL flag
+    await telegramService.initializeSender(true); // true = isPnlBot
     
     return true;
   } catch (error) {
-    logger.error(`Failed to initialize PNL Bot: ${error.message}`, { error });
+    pnlLogger.error(`Failed to initialize PNL Bot: ${error.message}`, { error });
     return false;
   }
 }
@@ -38,37 +41,37 @@ async function initialize() {
 function scheduleJobs() {
   try {
     // Update signal status every minute
- // Backfill signals every 5 minutes
-cron.schedule('*/5 * * * *', async () => {
-  try {
-    // Get source channels from mapping
-    const pnlMapping = require('./config/pnl-mapping.json');
-    const sourceChannels = Object.keys(pnlMapping.signalSources);
-    
-    // Run backfill for each source channel
-    for (const channel of sourceChannels) {
-      logger.info(`Running scheduled backfill for channel ${channel}`);
-      
+    // Backfill signals every 5 minutes
+    cron.schedule('*/5 * * * *', async () => {
       try {
-        // Import backfillSignals from pnlService
-        await pnlService.backfillSignals(channel, 10); // Check last 10 messages
+        // Get source channels from mapping
+        const pnlMapping = require('./config/pnl-mapping.json');
+        const sourceChannels = Object.keys(pnlMapping.signalSources);
+        
+        // Run backfill for each source channel
+        for (const channel of sourceChannels) {
+          pnlLogger.info(`Running scheduled backfill for channel ${channel}`);
+          
+          try {
+            // Import backfillSignals from pnlService
+            await pnlService.backfillSignals(channel, 10); // Check last 10 messages
+          } catch (error) {
+            pnlLogger.error(`Error backfilling channel ${channel}: ${error.message}`);
+          }
+        }
       } catch (error) {
-        logger.error(`Error backfilling channel ${channel}: ${error.message}`);
+        pnlLogger.error(`Error in scheduled backfill: ${error.message}`);
       }
-    }
-  } catch (error) {
-    logger.error(`Error in scheduled backfill: ${error.message}`);
-  }
-});
+    });
 
-logger.info('Scheduled automatic backfill every 5 minutes');
+    pnlLogger.info('Scheduled automatic backfill every 5 minutes');
     
     // Generate daily summary at midnight
     cron.schedule('0 0 * * *', async () => {
       try {
         await pnlService.generatePnlSummary('daily');
       } catch (error) {
-        logger.error(`Error generating daily summary: ${error.message}`, { error });
+        pnlLogger.error(`Error generating daily summary: ${error.message}`, { error });
       }
     });
     
@@ -77,7 +80,7 @@ logger.info('Scheduled automatic backfill every 5 minutes');
       try {
         await pnlService.generatePnlSummary('weekly');
       } catch (error) {
-        logger.error(`Error generating weekly summary: ${error.message}`, { error });
+        pnlLogger.error(`Error generating weekly summary: ${error.message}`, { error });
       }
     });
     
@@ -86,33 +89,13 @@ logger.info('Scheduled automatic backfill every 5 minutes');
       try {
         await pnlService.generatePnlSummary('monthly');
       } catch (error) {
-        logger.error(`Error generating monthly summary: ${error.message}`, { error });
+        pnlLogger.error(`Error generating monthly summary: ${error.message}`, { error });
       }
     });
-
-    // NEW: Schedule automatic PNL history forwarding every 10 minutes
-    cron.schedule('*/10 * * * *', async () => {
-      try {
-        await pnlService.forwardPnLHistoryUpdate();
-      } catch (error) {
-        logger.error(`Error forwarding PNL history: ${error.message}`, { error });
-      }
-    });
-    logger.info('PNL Bot jobs scheduled (including automatic PNL history forwarding)');
-
-    // NEW: Schedule real-time updates every minute
-    cron.schedule('* * * * *', async () => {
-      try {
-        await pnlService.updateSignals();
-        logger.info('Real-time signal update triggered');
-      } catch (error) {
-        logger.error(`Error in real-time update: ${error.message}`, { error });
-      }
-    });
-    logger.info('Scheduled real-time signal updates every minute');
-
+    
+    pnlLogger.info('PNL Bot jobs scheduled');
   } catch (error) {
-    logger.error(`Error scheduling PNL Bot jobs: ${error.message}`, { error });
+    pnlLogger.error(`Error scheduling PNL Bot jobs: ${error.message}`, { error });
   }
 }
 
@@ -121,7 +104,7 @@ logger.info('Scheduled automatic backfill every 5 minutes');
  */
 async function start() {
   try {
-    logger.info('Starting PNL Bot');
+    pnlLogger.info('Starting PNL Bot');
     
     // Initialize services
     const initialized = await initialize();
@@ -141,10 +124,10 @@ async function start() {
       );
     }
     
-    logger.info('PNL Bot started successfully');
+    pnlLogger.info('PNL Bot started successfully');
     return true;
   } catch (error) {
-    logger.error(`Failed to start PNL Bot: ${error.message}`, { error });
+    pnlLogger.error(`Failed to start PNL Bot: ${error.message}`, { error });
     return false;
   }
 }
@@ -172,10 +155,10 @@ if (require.main === module) {
     (async () => {
       try {
         const count = await pnlService.backfillSignals(channelArg, limit);
-        logger.info(`Backfill completed. Processed ${count} signals.`);
+        pnlLogger.info(`Backfill completed. Processed ${count} signals.`);
         process.exit(0);
       } catch (error) {
-        logger.error(`Backfill failed: ${error.message}`);
+        pnlLogger.error(`Backfill failed: ${error.message}`);
         process.exit(1);
       }
     })();
@@ -186,7 +169,7 @@ if (require.main === module) {
         if (!success) process.exit(1);
       })
       .catch(error => {
-        logger.error(`Uncaught error in PNL Bot: ${error.message}`, { error });
+        pnlLogger.error(`Uncaught error in PNL Bot: ${error.message}`, { error });
         process.exit(1);
       });
   }

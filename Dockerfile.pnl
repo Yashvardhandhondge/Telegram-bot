@@ -1,0 +1,14 @@
+FROM node:18-alpine
+
+WORKDIR /app
+
+COPY package*.json ./
+
+RUN npm install
+
+COPY . .
+
+ENV NODE_ENV=production
+ENV PNL_ENABLED=true
+
+CMD ["npm", "run", "run:pnl"]
