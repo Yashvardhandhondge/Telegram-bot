@@ -1,12 +1,11 @@
+version: '3.8'
+
 services:
-  #############################
-  # Shared infrastructure
-  #############################
   redis:
     image: redis:latest
     ports:
       - "6379:6379"
-    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}", "--databases", "16"]
     volumes:
       - redis-data:/data
     healthcheck:
@@ -17,9 +16,6 @@ services:
     networks:
       - app-network
 
-  #############################
-  # Main App Services
-  #############################
   app:
     build:
       context: .
@@ -32,23 +28,18 @@ services:
     environment:
       - DOCKER_ENV=true
       - REDIS_HOST=redis
-      - SERVICE_TYPE=main   
+      - SERVICE_TYPE=main
       - PNL_ENABLED=false
     ports:
       - "3000:3000"
     volumes:
       - ./:/app
       - /app/node_modules
+      - ./tmp/sessions/user:/app/src/tmp/sessions/user
     command: ["npm", "run", "run:listener"]
     restart: unless-stopped
     networks:
       - app-network
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-        reservations:
-          memory: 256M
 
   consumer:
     build:
@@ -57,8 +48,6 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      app:
-        condition: service_started
     env_file:
       - .env
     environment:
@@ -73,15 +62,37 @@ services:
     restart: unless-stopped
     networks:
       - app-network
-    deploy:
-      resources:
-        limits:
-          memory: 384M
 
-networks:
-  app-network:
-    driver: bridge
+  pnl-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - DOCKER_ENV=true
+      - REDIS_HOST=redis
+      - SERVICE_TYPE=pnl
+      - PNL_ENABLED=true
+      - PNL_TELEGRAM_API_ID=${PNL_TELEGRAM_API_ID:-${TELEGRAM_API_ID}}
+      - PNL_TELEGRAM_API_HASH=${PNL_TELEGRAM_API_HASH:-${TELEGRAM_API_HASH}}
+    volumes:
+      - ./:/app
+      - /app/node_modules
+      - ./tmp/sessions/pnl_bot:/app/src/tmp/sessions/pnl_bot
+      - ./src/config:/app/src/config
+    command: ["node", "src/pnlBot.js"]
+    restart: unless-stopped
+    networks:
+      - app-network
 
 volumes:
   redis-data:
     driver: local
+
+networks:
+  app-network:
+    driver: bridge
