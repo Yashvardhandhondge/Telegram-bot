@@ -16,16 +16,45 @@ let redisClient = null;
 // Load PNL mapping
 const pnlMappingPath = path.join(__dirname, '../config/pnl-mapping.json');
 let pnlMapping = { signalSources: {} };
-try {
-  if (fs.existsSync(pnlMappingPath)) {
-    pnlMapping = JSON.parse(fs.readFileSync(pnlMappingPath, 'utf8'));
-    logger.info(`Loaded PNL mapping: ${JSON.stringify(pnlMapping)}`);
-  } else {
-    logger.warn('PNL mapping file not found, using default configuration');
+
+function loadPnlMapping() {
+  try {
+    if (fs.existsSync(pnlMappingPath)) {
+      // Clear require cache to ensure we get the latest version
+      delete require.cache[require.resolve(pnlMappingPath)];
+      pnlMapping = require(pnlMappingPath);
+      logger.info(`Loaded PNL mapping: ${JSON.stringify(pnlMapping)}`);
+    } else {
+      logger.warn(`PNL mapping file not found at ${pnlMappingPath}. Creating default mapping.`);
+      
+      // Create default mapping structure
+      const defaultMapping = {
+        signalSources: {
+          "-1002404846297/5": "-1002404846297/178"
+        }
+      };
+      
+      // Ensure directory exists
+      const configDir = path.dirname(pnlMappingPath);
+      if (!fs.existsSync(configDir)) {
+        fs.mkdirSync(configDir, { recursive: true });
+      }
+      
+      // Write default mapping
+      fs.writeFileSync(pnlMappingPath, JSON.stringify(defaultMapping, null, 2));
+      logger.info(`Created default PNL mapping at ${pnlMappingPath}`);
+      
+      pnlMapping = defaultMapping;
+    }
+    return pnlMapping;
+  } catch (error) {
+    logger.error(`Error loading PNL mapping: ${error.message}`);
+    return { signalSources: {} };
   }
-} catch (error) {
-  logger.error(`Error loading PNL mapping: ${error.message}`);
 }
+
+// Initial load of the PNL mapping
+loadPnlMapping();
 
 /**
  * Initialize the PNL service and connect to Redis
@@ -34,10 +63,16 @@ async function initialize() {
   try {
     logger.info('Initializing PNL tracking service');
     
+    // Reload PNL mapping to ensure we have the latest
+    loadPnlMapping();
+    
     // Connect to Redis if not already connected
     if (!redisClient) {
+      // Use database 1 for PNL bot to avoid conflicts with main bot
+      const redisUrl = `redis://:${config.redis.password}@${config.redis.host}:${config.redis.port}/1`;
+      
       redisClient = createClient({
-        url: `redis://:${config.redis.password}@${config.redis.host}:${config.redis.port}`
+        url: redisUrl
       });
       
       redisClient.on('error', (err) => {
@@ -45,7 +80,7 @@ async function initialize() {
       });
       
       await redisClient.connect();
-      logger.info('Connected to Redis for PNL tracking');
+      logger.info('Connected to Redis for PNL tracking (using database 1)');
     }
     
     return true;
@@ -61,9 +96,23 @@ async function initialize() {
  * @returns {string|null} Destination channel ID or null if not a source
  */
 function getDestinationForSource(chatId) {
+  // Make sure we have the latest mapping
+  const currentMapping = loadPnlMapping();
+  
   // Check if this chat ID is in our mapping
-  if (pnlMapping.signalSources[chatId]) {
-    return pnlMapping.signalSources[chatId];
+  if (currentMapping.signalSources[chatId]) {
+    return currentMapping.signalSources[chatId];
+  }
+  
+  // Try normalized formats
+  for (const sourceChannel in currentMapping.signalSources) {
+    // Check different formats of the same chat ID
+    if (chatId.includes(sourceChannel) || 
+        sourceChannel.includes(chatId) ||
+        chatId.includes(sourceChannel.replace('-', '')) ||
+        sourceChannel.includes(chatId.replace('-', ''))) {
+      return currentMapping.signalSources[sourceChannel];
+    }
   }
   
   // Also check config.pnl.resultChannel as fallback
@@ -71,12 +120,23 @@ function getDestinationForSource(chatId) {
 }
 
 /**
- * Process a message to check if it's a trading signal
- * @param {Object} message Message object
- * @returns {Promise<boolean>} True if signal was processed
+ * Get all source channels from mapping
+ * @returns {string[]} Array of source channel IDs
  */
+function getSourceChannels() {
+  // Make sure we have the latest mapping
+  const currentMapping = loadPnlMapping();
+  return Object.keys(currentMapping.signalSources);
+}
+
 async function processMessage(message) {
   try {
+    // In the processMessage function near the beginning
+    if (process.env.SERVICE_TYPE !== 'pnl') {
+      logger.debug('Not running as PNL service, skipping message processing');
+      return false;
+    }
+    
     // First check if message is from a PNL source channel
     const destinationChannel = getDestinationForSource(message.chatId);
     
@@ -87,7 +147,6 @@ async function processMessage(message) {
     
     logger.info(`Processing message from PNL source ${message.chatId} with destination ${destinationChannel}`);
     
-    // Check if message type is a crypto signal
     if (message.messageType !== 'crypto_signal') {
       logger.debug(`Message ${message.messageId} is not a crypto signal`);
       return false;
@@ -807,6 +866,7 @@ async function sendPnlUpdate(message, channelId) {
         `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
         {
           chat_id: destinationChannel,
+          message_thread_id: destinationChannel.split('/')[1],
           text: message,
           parse_mode: 'HTML'
         }
@@ -839,6 +899,7 @@ async function sendPnlUpdate(message, channelId) {
   }
 }
 
+
 /**
  * Generate a summary of PNL results for a time period
  * @param {string} period 'daily', 'weekly', or 'monthly'
@@ -850,6 +911,9 @@ async function generatePnlSummary(period = 'daily', channelId = null) {
     if (!redisClient) {
       await initialize();
     }
+    
+    // Make sure we have the latest mapping
+    loadPnlMapping();
     
     // Get the timeframe for the summary
     const now = new Date();
@@ -1054,6 +1118,9 @@ Direction Split: ${stats.directions.BUY} Long | ${stats.directions.SELL} Short`;
 async function backfillSignals(channelId, limit = 100) {
   try {
     logger.info(`Starting backfill of signals from channel ${channelId}, limit: ${limit}`);
+    
+    // Make sure we have the latest mapping
+    loadPnlMapping();
     
     // Get the destination channel for this source
     const destinationChannel = getDestinationForSource(channelId);

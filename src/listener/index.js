@@ -12,6 +12,89 @@ let telegramClient;
 const channelMapping = config.loadChannelMapping();
 logger.info(`Loaded mapping for ${Object.keys(channelMapping).length} users`);
 
+let lastMessageTimestamp = Date.now();
+let isConnectionHealthy = true;
+
+// Add this function to check connection health and recover if needed
+/**
+ * Check connection health and recover if needed
+ */
+async function checkConnectionHealth() {
+  try {
+    const currentTime = Date.now();
+    const timeSinceLastMessage = currentTime - lastMessageTimestamp;
+    
+    // If no messages for 3 minutes, check connection
+    if (timeSinceLastMessage > 3 * 60 * 1000) {
+      logger.warn(`No messages received for ${timeSinceLastMessage / 1000} seconds, checking connection health...`);
+      
+      // Try to ping the client
+      const pingSuccess = await sendPing(telegramClient);
+      
+      if (!pingSuccess) {
+        logger.warn('Ping failed, attempting recovery...');
+        await recoverConnection();
+      } else {
+        // Even if ping succeeds, test getting some dialogs
+        try {
+          const dialogs = await telegramClient.getDialogs({ limit: 1 });
+          logger.info('Successfully retrieved dialogs, connection is healthy');
+        } catch (dialogError) {
+          logger.warn(`Dialog fetch failed despite successful ping: ${dialogError.message}`);
+          await recoverConnection();
+        }
+      }
+    } else {
+      // All good, connection is active
+      if (!isConnectionHealthy) {
+        logger.info('Connection appears to be healthy again');
+        isConnectionHealthy = true;
+      }
+    }
+  } catch (error) {
+    logger.error(`Error in connection health check: ${error.message}`);
+  }
+}
+
+/**
+ * Recover connection by reconnecting the client
+ */
+async function recoverConnection() {
+  try {
+    logger.warn('Attempting to recover connection...');
+    isConnectionHealthy = false;
+    
+    // Try to disconnect cleanly
+    try {
+      if (telegramClient) {
+        await telegramClient.disconnect();
+      }
+    } catch (disconnectError) {
+      logger.warn(`Error during disconnect: ${disconnectError.message}`);
+    }
+    
+    // Wait a bit before reconnecting
+    logger.info('Waiting 5 seconds before reconnecting...');
+    await new Promise(resolve => setTimeout(resolve, 5000));
+    
+    // Reconnect
+    logger.info('Reconnecting to Telegram...');
+    telegramClient = await initializeClient(false); // false = main bot
+    
+    // Ensure we're connected
+    if (!telegramClient.connected) {
+      await telegramClient.connect();
+    }
+    
+    // Re-add the message handler
+    telegramClient.addEventHandler(handleNewMessage, new NewMessage({}));
+    
+    logger.info('Connection recovery completed, handler re-registered');
+  } catch (error) {
+    logger.error(`Error during connection recovery: ${error.message}`);
+  }
+}
+
 /**
  * Initialize the Telegram client and start listening for messages
  */
@@ -193,6 +276,8 @@ async function logConnectedChats() {
  */
 async function handleNewMessage(event) {
   try {
+    lastMessageTimestamp = Date.now();
+    isConnectionHealthy = true;
     const message = event.message;
 
     // Skip messages without text
@@ -203,10 +288,6 @@ async function handleNewMessage(event) {
       }
       return;
     }
-
-    // Debug log raw message structure (just first level keys to avoid huge logs)
-    const messageKeys = Object.keys(message);
-    logger.debug(`Message received with keys: ${messageKeys.join(', ')}`);
 
     // Get chat ID - corrected for the actual message format
     let chatId;
@@ -241,6 +322,27 @@ async function handleNewMessage(event) {
     if (!chatId) {
       logger.warn(`Could not determine chat ID for message: ${message.text.substring(0, 100)}`);
       return;
+    }
+
+    // *** IMPORTANT: PNL Channel Check ***
+    // Skip PNL-exclusive channels to avoid processing messages meant for the PNL bot
+    if (process.env.PNL_CHANNELS) {
+      const pnlChannels = process.env.PNL_CHANNELS.split(',');
+      
+      // Check if this is a PNL-exclusive channel
+      const isPnlExclusiveChannel = pnlChannels.some(pnlChannel => {
+        // Make sure we handle different channel ID formats
+        return chatId.includes(pnlChannel) || 
+               chatId.includes(pnlChannel.replace('-', '')) ||
+               pnlChannel.includes(chatId) ||
+               pnlChannel.includes(chatId.replace('-', ''));
+      });
+      
+      if (isPnlExclusiveChannel) {
+        // This is a PNL channel, so we should skip it in the main service
+        logger.debug(`Skipping PNL-exclusive channel ${chatId} in main bot`);
+        return;
+      }
     }
 
     // Log normalized formats for debugging
@@ -394,6 +496,8 @@ process.on('unhandledRejection', (reason, promise) => {
   logger.error(`Unhandled rejection at ${promise}, reason: ${reason}`);
   logger.info('Continuing despite unhandled rejection');
 });
+
+setInterval(checkConnectionHealth, 60 * 1000);
 
 module.exports = {
   telegramClient,

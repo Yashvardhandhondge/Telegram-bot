@@ -2,13 +2,22 @@ FROM node:18-alpine
 
 WORKDIR /app
 
+# Copy package.json and package-lock.json
 COPY package*.json ./
 
+# Install dependencies
 RUN npm install
 
+# Copy the rest of the application
 COPY . .
 
+# Create session directories
+RUN mkdir -p /app/tmp/sessions/pnl_bot
+
+# Environment variables
 ENV NODE_ENV=production
 ENV PNL_ENABLED=true
+ENV SERVICE_TYPE=pnl
 
+# Set the command to run
 CMD ["npm", "run", "run:pnl"]

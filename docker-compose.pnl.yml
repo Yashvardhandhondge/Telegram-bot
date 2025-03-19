@@ -4,30 +4,39 @@ services:
   pnl-bot:
     build:
       context: .
-      dockerfile: Dockerfile
-    depends_on:
-      - redis
+      dockerfile: Dockerfile.pnl
     env_file:
-      - .env
+      - .env.pnl
     environment:
       - DOCKER_ENV=true
-      - REDIS_HOST=redis
+      - REDIS_HOST=redis-pnl
       - PNL_ENABLED=true
-      - USE_SEPARATE_CLIENT=true
+      - SERVICE_TYPE=pnl
     volumes:
       - ./:/app
       - /app/node_modules
+      - ./tmp/sessions/pnl_bot:/app/tmp/sessions/pnl_bot  # Mount session directory
     command: ["npm", "run", "run:pnl"]
     restart: unless-stopped
     networks:
-      - backend_default
+      - pnl-network
+    depends_on:
+      - redis-pnl
 
-  redis:
+  redis-pnl:
     image: redis:latest
     command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
+    volumes:
+      - redis-pnl-data:/data
     networks:
-      - backend_default
+      - pnl-network
+    ports:
+      - "6380:6379"  # Note: Different port to avoid conflict
 
 networks:
-  backend_default:
-    external: true
+  pnl-network:
+    driver: bridge
+
+volumes:
+  redis-pnl-data:
+    driver: local
